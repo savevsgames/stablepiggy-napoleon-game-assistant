@@ -1,0 +1,51 @@
+# Node / build artifacts
+node_modules/
+dist/
+build/
+out/
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# Environment / secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+config.local.*
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Foundry VTT development
+packs/*.db
+packs/**/_source/
+*.lock
+
+# Coverage and test output
+coverage/
+.nyc_output/
+*.lcov
+
+# Relay service runtime
+relay/data/
+relay/logs/
+
+# Internal planning / reference docs — NEVER commit
+# This directory holds Phase 1 architecture docs, prompt templates, and
+# internal project archaeology that are kept local for development context.
+# These are not part of the public module surface and are intentionally
+# excluded from version control.
+planning/

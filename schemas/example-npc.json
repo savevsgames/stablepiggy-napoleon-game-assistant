@@ -1,0 +1,166 @@
+{
+  "name": "Baron Vlad Aldicott",
+  "type": "npc",
+  "img": "systems/pf2e/icons/default-icons/npc.svg",
+  "prototypeToken": {
+    "flags": { "pf2e": { "linkToActorSize": true, "autoscale": true } },
+    "name": "Baron Vlad Aldicott",
+    "displayName": 20,
+    "displayBars": 20,
+    "actorLink": false,
+    "disposition": -1,
+    "lockRotation": true,
+    "rotation": 0,
+    "alpha": 1,
+    "height": 1,
+    "width": 1,
+    "texture": {
+      "src": "systems/pf2e/icons/default-icons/npc.svg",
+      "anchorX": 0.5, "anchorY": 0.5, "offsetX": 0, "offsetY": 0,
+      "fit": "contain", "scaleX": 1, "scaleY": 1, "rotation": 0,
+      "tint": "#ffffff", "alphaThreshold": 0.75
+    },
+    "sight": { "enabled": false, "range": 0, "angle": 360, "visionMode": "basic", "color": null, "attenuation": 0.1, "brightness": 0, "saturation": 0, "contrast": 0 },
+    "bar1": { "attribute": "attributes.hp" },
+    "bar2": { "attribute": null },
+    "light": { "negative": false, "priority": 0, "alpha": 0.5, "angle": 360, "bright": 0, "color": null, "coloration": 1, "dim": 0, "attenuation": 0.5, "luminosity": 0.5, "saturation": 0, "contrast": 0, "shadows": 0, "animation": { "type": null, "speed": 5, "intensity": 5, "reverse": false }, "darkness": { "min": 0, "max": 1 } },
+    "detectionModes": [],
+    "occludable": { "radius": 0 },
+    "ring": { "enabled": false, "colors": { "ring": null, "background": null }, "effects": 1, "subject": { "scale": 1, "texture": null } },
+    "turnMarker": { "mode": 1, "animation": null, "src": null, "disposition": false },
+    "movementAction": null,
+    "randomImg": false,
+    "appendNumber": false,
+    "prependAdjective": false
+  },
+  "effects": [],
+  "system": {
+    "attributes": {
+      "hp": { "value": 65, "max": 65, "temp": 0, "details": "" },
+      "ac": { "value": 22, "details": "studded leather, shield" },
+      "allSaves": { "value": "" },
+      "speed": { "value": 25, "otherSpeeds": [], "details": "" },
+      "immunities": [],
+      "weaknesses": []
+    },
+    "initiative": { "statistic": "perception" },
+    "details": {
+      "languages": { "value": ["common", "varisian", "shoanti"], "details": "" },
+      "level": { "value": 5 },
+      "blurb": "Korvosan Noble, House Aldicott Dock Master",
+      "publicNotes": "<p>An aging Korvosan noble, thinned by paranoia and minor alchemy. He carries himself with the brittle dignity of a man who has survived longer than he expected to. He controls House Aldicott's dock revenue through a network of informants and minor alchemists, and speaks slowly, choosing each word as if it might be poisoned.</p>",
+      "privateNotes": "<p>Believes the PCs are assassins sent by a rival noble house. Will negotiate if approached with proof of a common enemy. Does not fight unless cornered — prefers negotiation, bribery, or summoning the Korvosan Guard. If combat begins, uses Silver Tongue reaction defensively, falls back to the inner room, and triggers Bodyguard Summons on round 2.</p>",
+      "publication": {
+        "title": "StablePiggy Napoleon Game Assistant — schema example",
+        "authors": "",
+        "license": "ORC",
+        "remaster": true
+      }
+    },
+    "resources": {},
+    "_migration": { "version": 0.955, "previous": null },
+    "abilities": {
+      "str": { "mod": 0 },
+      "dex": { "mod": 2 },
+      "con": { "mod": 1 },
+      "int": { "mod": 3 },
+      "wis": { "mod": 2 },
+      "cha": { "mod": 4 }
+    },
+    "perception": {
+      "details": "",
+      "mod": 13,
+      "senses": [],
+      "vision": true
+    },
+    "saves": {
+      "fortitude": { "value": 10, "saveDetail": "" },
+      "reflex": { "value": 12, "saveDetail": "" },
+      "will": { "value": 13, "saveDetail": "" }
+    },
+    "skills": {
+      "deception": { "base": 14 },
+      "diplomacy": { "base": 14 },
+      "intimidation": { "base": 12 },
+      "society": { "base": 11 }
+    },
+    "traits": {
+      "value": ["human", "humanoid"],
+      "rarity": "common",
+      "size": { "value": "med" }
+    }
+  },
+  "items": [
+    {
+      "_id": "VldRapierStrk001",
+      "img": "systems/pf2e/icons/default-icons/melee.svg",
+      "name": "Rapier",
+      "sort": 100000,
+      "type": "melee",
+      "system": {
+        "description": { "value": "<p>A well-balanced dueling blade, silver-chased, with a family crest on the pommel.</p>", "gm": "" },
+        "bonus": { "value": 13 },
+        "damageRolls": {
+          "primary": { "damage": "1d6+2", "damageType": "piercing" }
+        },
+        "traits": { "value": ["agile", "deadly-d8", "finesse"], "otherTags": [] }
+      },
+      "_stats": { "compendiumSource": null, "duplicateSource": null, "exportSource": null, "coreVersion": "13.351", "systemId": "pf2e", "systemVersion": "7.12.1", "lastModifiedBy": null },
+      "effects": [],
+      "folder": null,
+      "flags": {},
+      "ownership": { "default": 0 }
+    },
+    {
+      "_id": "VldBodyguardSmn2",
+      "img": "systems/pf2e/icons/actions/TwoActions.webp",
+      "name": "Bodyguard Summons",
+      "sort": 200000,
+      "type": "action",
+      "system": {
+        "description": { "value": "<p><strong>Frequency</strong> once per day. The Baron calls in a favor from the Korvosan Guard. Four Korvosan Guards (level 1) arrive within [[/r 1d4 #rounds]] rounds and obey his commands until the encounter ends.</p>", "gm": "" },
+        "actionType": { "value": "action" },
+        "actions": { "value": 2 },
+        "category": "defensive",
+        "traits": { "value": [], "otherTags": [] }
+      },
+      "_stats": { "compendiumSource": null, "duplicateSource": null, "exportSource": null, "coreVersion": "13.351", "systemId": "pf2e", "systemVersion": "7.12.1", "lastModifiedBy": null },
+      "effects": [],
+      "folder": null,
+      "flags": {},
+      "ownership": { "default": 0 }
+    },
+    {
+      "_id": "VldSilverTongue3",
+      "img": "systems/pf2e/icons/actions/Reaction.webp",
+      "name": "Silver Tongue",
+      "sort": 300000,
+      "type": "action",
+      "system": {
+        "description": { "value": "<p><strong>Reaction</strong>. <strong>Trigger</strong>: an ally within 30 feet is targeted by a Deception or Diplomacy check. <strong>Effect</strong>: the target rerolls the check with a +2 circumstance bonus.</p>", "gm": "" },
+        "actionType": { "value": "reaction" },
+        "category": "defensive",
+        "traits": { "value": ["linguistic", "mental"], "otherTags": [] }
+      },
+      "_stats": { "compendiumSource": null, "duplicateSource": null, "exportSource": null, "coreVersion": "13.351", "systemId": "pf2e", "systemVersion": "7.12.1", "lastModifiedBy": null },
+      "effects": [],
+      "folder": null,
+      "flags": {},
+      "ownership": { "default": 0 }
+    }
+  ],
+  "folder": null,
+  "flags": {},
+  "_stats": {
+    "compendiumSource": null,
+    "duplicateSource": null,
+    "exportSource": null,
+    "coreVersion": "13.351",
+    "systemId": "pf2e",
+    "systemVersion": "7.12.1",
+    "createdTime": null,
+    "modifiedTime": null,
+    "lastModifiedBy": null
+  },
+  "ownership": { "default": 0 }
+}

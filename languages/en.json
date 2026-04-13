@@ -1,0 +1,12 @@
+{
+  "stablepiggy-napoleon-game-assistant.name": "StablePiggy Napoleon Game Assistant",
+  "stablepiggy-napoleon-game-assistant.description": "AI-assisted co-GM module for Foundry VTT. Generates NPCs, remembers campaign lore, answers rules questions, and produces session prep.",
+  "stablepiggy-napoleon-game-assistant.settings.relayEndpoint.name": "Relay Endpoint",
+  "stablepiggy-napoleon-game-assistant.settings.relayEndpoint.hint": "WebSocket URL the module connects to. Leave blank to disable AI features (schema and example NPC remain available as reference).",
+  "stablepiggy-napoleon-game-assistant.settings.authToken.name": "Authentication Token",
+  "stablepiggy-napoleon-game-assistant.settings.authToken.hint": "Shared secret or platform-issued token for relay authentication. Leave blank if the relay does not require authentication.",
+  "stablepiggy-napoleon-game-assistant.commands.napoleon": "/napoleon",
+  "stablepiggy-napoleon-game-assistant.status.connecting": "Connecting to relay...",
+  "stablepiggy-napoleon-game-assistant.status.connected": "Connected",
+  "stablepiggy-napoleon-game-assistant.status.disconnected": "Disconnected"
+}

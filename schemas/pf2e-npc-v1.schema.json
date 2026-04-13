@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stablepiggy.com/schemas/napoleon-foundry-v1/pf2e-npc-v1.schema.json",
+  "title": "StablePiggy Napoleon Game Assistant — pf2e NPC v1 (v7.12.1 canonical)",
+  "description": "JSON Schema for Foundry VTT pf2e system v7.12.1 NPC Actor documents (post-remaster). Lenient by intent (additionalProperties: true at every level) — enforces the structural required fields and canonical v7 shape without rejecting valid Foundry-exported documents that include fields the schema does not know about. Compatible with Foundry v13.351.",
+  "type": "object",
+  "required": ["name", "type", "img", "prototypeToken", "effects", "system", "items", "folder", "flags", "_stats", "ownership"],
+  "additionalProperties": true,
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "type": { "const": "npc", "description": "Always 'npc'. PCs use 'character' (not supported by this schema)." },
+    "img": { "type": "string", "description": "Actor portrait path. Default: 'systems/pf2e/icons/default-icons/npc.svg'" },
+    "prototypeToken": {
+      "type": "object",
+      "description": "Token settings — boilerplate for most NPCs. Key NPC-specific fields: actorLink=false, disposition=-1 (hostile), sight.enabled=false, texture.src=npc.svg. See schemas/example-npc.json for a reference.",
+      "additionalProperties": true
+    },
+    "effects": {
+      "type": "array",
+      "description": "Active effects. Usually empty [] for newly-created documents."
+    },
+    "system": {
+      "type": "object",
+      "required": ["attributes", "initiative", "details", "resources", "_migration", "abilities", "perception", "saves", "skills", "traits"],
+      "additionalProperties": true,
+      "properties": {
+        "attributes": {
+          "type": "object",
+          "required": ["hp", "ac", "allSaves", "speed", "immunities", "weaknesses"],
+          "additionalProperties": true,
+          "properties": {
+            "hp": {
+              "type": "object",
+              "required": ["value", "max", "temp"],
+              "properties": {
+                "value": { "type": "integer", "minimum": 0 },
+                "max": { "type": "integer", "minimum": 1 },
+                "temp": { "type": "integer", "minimum": 0, "description": "Temporary HP. Usually 0 on creation." },
+                "details": { "type": "string" }
+              }
+            },
+            "ac": {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": { "type": "integer", "minimum": 0 },
+                "details": { "type": "string", "description": "Armor description, e.g. 'chain shirt, shield'" }
+              }
+            },
+            "allSaves": {
+              "type": "object",
+              "properties": {
+                "value": { "type": "string", "description": "Free-text save notes, e.g. '+1 status vs disease'" }
+              }
+            },
+            "speed": {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": { "type": "integer", "minimum": 0 },
+                "otherSpeeds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["type", "value"],
+                    "properties": {
+                      "type": { "type": "string", "enum": ["swim", "fly", "burrow", "climb"] },
+                      "value": { "type": "integer" }
+                    }
+                  }
+                },
+                "details": { "type": "string" }
+              }
+            },
+            "immunities": {
+              "type": "array",
+              "description": "Required array (empty allowed). Each entry: { type: 'fire' | 'paralyzed' | 'sleep' | ... }. Populate for canonical creature types that have immunities (undead, constructs, elementals).",
+              "items": {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                  "type": { "type": "string" }
+                }
+              }
+            },
+            "weaknesses": {
+              "type": "array",
+              "description": "Required array (empty allowed). Each entry: { type: 'cold-iron' | 'good' | ..., value: 10 }. Populate for canonical creature archetypes with vulnerabilities (hags -> cold-iron, vampires -> sunlight/good, demons -> cold-iron/good, werewolves -> silver).",
+              "items": {
+                "type": "object",
+                "required": ["type", "value"],
+                "properties": {
+                  "type": { "type": "string" },
+                  "value": { "type": "integer" }
+                }
+              }
+            },
+            "resistances": {
+              "type": "array",
+              "description": "Optional array. Each entry: { type: 'cold' | 'void' | ..., value: 10 }. Populate for creatures with damage resistance (aquatic -> cold, undead -> void/negative, fiery -> fire).",
+              "items": {
+                "type": "object",
+                "required": ["type", "value"],
+                "properties": {
+                  "type": { "type": "string" },
+                  "value": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "initiative": {
+          "type": "object",
+          "required": ["statistic"],
+          "properties": {
+            "statistic": {
+              "type": "string",
+              "description": "Usually 'perception'. Some NPCs use a skill like 'stealth' for initiative."
+            }
+          }
+        },
+        "details": {
+          "type": "object",
+          "required": ["languages", "level", "publication"],
+          "additionalProperties": true,
+          "properties": {
+            "languages": {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": { "type": "array", "items": { "type": "string" } },
+                "details": { "type": "string" }
+              },
+              "description": "NPC languages live here in system.details, NOT in system.traits."
+            },
+            "level": {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": { "type": "integer", "minimum": -1, "maximum": 25 }
+              }
+            },
+            "blurb": {
+              "type": "string",
+              "description": "Short subtitle shown under the NPC name, e.g. 'Cultist of the Pallid Princess'"
+            },
+            "publicNotes": {
+              "type": "string",
+              "description": "HTML player-facing description. Wrap paragraphs in <p>. @UUID[] and @Check[] macros render as interactive buttons."
+            },
+            "privateNotes": {
+              "type": "string",
+              "description": "HTML GM-only notes, tactics, motivations."
+            },
+            "publication": {
+              "type": "object",
+              "required": ["title", "authors", "license", "remaster"],
+              "properties": {
+                "title": { "type": "string" },
+                "authors": { "type": "string" },
+                "license": { "type": "string", "enum": ["ORC", "OGL", "CC"], "description": "Use 'ORC' for remaster-compatible custom content" },
+                "remaster": { "type": "boolean", "description": "true for pf2e remaster-era content" }
+              }
+            }
+          },
+          "description": "NOTE: pf2e v7 remaster REMOVED alignment from the rules. Do NOT emit system.details.alignment. Alignment-flavor traits (chaotic/evil/good/lawful) survive as tags in system.traits.value, but alignment is not a details field."
+        },
+        "resources": {
+          "type": "object",
+          "description": "Usually empty {} for martial NPCs. Focus-spell users: { focus: { max: 1, value: 1 } }.",
+          "additionalProperties": true
+        },
+        "_migration": {
+          "type": "object",
+          "required": ["version"],
+          "properties": {
+            "version": { "type": "number", "description": "Current pf2e system migration version. Use 0.955 for v7.12.1." },
+            "previous": {}
+          }
+        },
+        "abilities": {
+          "type": "object",
+          "required": ["str", "dex", "con", "int", "wis", "cha"],
+          "additionalProperties": false,
+          "properties": {
+            "str": { "$ref": "#/$defs/abilityMod" },
+            "dex": { "$ref": "#/$defs/abilityMod" },
+            "con": { "$ref": "#/$defs/abilityMod" },
+            "int": { "$ref": "#/$defs/abilityMod" },
+            "wis": { "$ref": "#/$defs/abilityMod" },
+            "cha": { "$ref": "#/$defs/abilityMod" }
+          }
+        },
+        "perception": {
+          "type": "object",
+          "required": ["mod"],
+          "properties": {
+            "mod": { "type": "integer", "description": "Perception modifier. NOTE: field is 'mod' NOT 'value' in v7 canonical shape." },
+            "details": { "type": "string" },
+            "senses": {
+              "type": "array",
+              "description": "Array of sense OBJECTS, not strings. e.g. [{type: 'darkvision'}, {acuity: 'imprecise', range: 60, type: 'scent'}]",
+              "items": {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                  "type": { "type": "string", "description": "darkvision, lowLightVision, scent, tremorsense, etc." },
+                  "acuity": { "type": "string", "enum": ["precise", "imprecise", "vague"] },
+                  "range": { "type": "integer" }
+                }
+              }
+            },
+            "vision": { "type": "boolean", "description": "Usually true. False for blind creatures." }
+          },
+          "description": "CANONICAL LOCATION: top-level of system, NOT under system.attributes. Pre-v7 schemas had it nested under attributes; v7 moved it out."
+        },
+        "saves": {
+          "type": "object",
+          "required": ["fortitude", "reflex", "will"],
+          "properties": {
+            "fortitude": { "$ref": "#/$defs/saveField" },
+            "reflex": { "$ref": "#/$defs/saveField" },
+            "will": { "$ref": "#/$defs/saveField" }
+          }
+        },
+        "skills": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["base"],
+            "properties": {
+              "base": { "type": "integer", "description": "Skill modifier, e.g. religion +24 -> base: 24" }
+            }
+          },
+          "description": "CANONICAL LOCATION for NPC skills. Keys are pf2e skill names: acrobatics, arcana, athletics, crafting, deception, diplomacy, intimidation, medicine, nature, occultism, performance, religion, society, stealth, survival, thievery. DO NOT use type: 'lore' items for these core skills — lore items are ONLY for actual lore subskills like 'Dragon Lore' or 'Korvosan Lore'."
+        },
+        "traits": {
+          "type": "object",
+          "required": ["value", "rarity", "size"],
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Creature traits. Includes creature type ('humanoid', 'dragon', 'undead'), ancestry ('human', 'orc'), and flavor tags ('chaotic', 'evil', 'good', 'lawful', 'fire', 'cold'). Alignment-flavor traits survive the pf2e remaster even though alignment-as-rules was removed."
+            },
+            "rarity": { "type": "string", "enum": ["common", "uncommon", "rare", "unique"] },
+            "size": {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "enum": ["tiny", "sm", "med", "lg", "huge", "grg"],
+                  "description": "Size enum uses abbreviations: sm (small), med (medium), lg (large), grg (gargantuan)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "description": "Embedded items. Each item is a full Foundry mini-document with its own envelope (_id, sort, _stats, effects, folder, flags, ownership). See docs/pf2e-schema.md for per-type shape guidance.",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "system"],
+        "additionalProperties": true,
+        "properties": {
+          "_id": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 16,
+            "pattern": "^[A-Za-z0-9]{16}$",
+            "description": "16-char alphanumeric unique ID. REQUIRED for any item referenced by another item (e.g., spells referenced by spellcastingEntry slots). Recommended for all items."
+          },
+          "sort": {
+            "type": "integer",
+            "description": "Item display order. Start at 100000 and increment by 100000 per item."
+          },
+          "name": { "type": "string", "minLength": 1 },
+          "type": {
+            "type": "string",
+            "enum": ["melee", "action", "spell", "spellcastingEntry", "feat", "lore", "weapon", "armor", "consumable", "equipment", "treasure"],
+            "description": "Item type. For spellcasters, emit ONE spellcastingEntry parent AND individual spell items that reference it. For strikes, use 'melee' (natural weapons) or 'weapon' (inventory weapons). For core skills, use system.skills (NOT 'lore' items — lore is for actual lore subskills)."
+          },
+          "img": { "type": "string" },
+          "system": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Type-specific system block. See docs/pf2e-schema.md for the canonical shape of each item type."
+          },
+          "_stats": {
+            "type": "object",
+            "properties": {
+              "coreVersion": { "type": "string" },
+              "systemId": { "const": "pf2e" },
+              "systemVersion": { "type": "string" }
+            }
+          },
+          "effects": { "type": "array" },
+          "folder": { "type": ["null", "string"] },
+          "flags": { "type": "object" },
+          "ownership": {
+            "type": "object",
+            "properties": { "default": { "type": "integer" } }
+          }
+        }
+      }
+    },
+    "folder": { "type": ["null", "string"] },
+    "flags": { "type": "object" },
+    "_stats": {
+      "type": "object",
+      "required": ["coreVersion", "systemId", "systemVersion"],
+      "properties": {
+        "compendiumSource": { "type": ["null", "string"] },
+        "duplicateSource": { "type": ["null", "string"] },
+        "exportSource": { "type": ["null", "object"] },
+        "coreVersion": {
+          "type": "string",
+          "description": "Foundry core version. As of 2026-04: '13.351' (last stable v13 before v14)."
+        },
+        "systemId": { "const": "pf2e" },
+        "systemVersion": {
+          "type": "string",
+          "description": "pf2e system version. As of 2026-04: '7.12.1'."
+        },
+        "createdTime": { "type": ["null", "integer"] },
+        "modifiedTime": { "type": ["null", "integer"] },
+        "lastModifiedBy": { "type": ["null", "string"] }
+      }
+    },
+    "ownership": {
+      "type": "object",
+      "required": ["default"],
+      "properties": {
+        "default": {
+          "type": "integer",
+          "description": "Default permission level. 0 = none (GM-only NPC), 1 = limited, 2 = observer, 3 = owner. Most hostile NPCs use 0."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "abilityMod": {
+      "type": "object",
+      "required": ["mod"],
+      "properties": {
+        "mod": {
+          "type": "integer",
+          "minimum": -5,
+          "maximum": 10,
+          "description": "Ability modifier (NOT score). -5 to +10 covers all pf2e canon creatures."
+        }
+      }
+    },
+    "saveField": {
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": { "type": "integer" },
+        "saveDetail": { "type": "string" }
+      }
+    }
+  }
+}
