@@ -152,7 +152,7 @@ MIT License. See [`LICENSE`](./LICENSE) for the full text and third-party attrib
 
 ## Credits
 
-- **Lead developer:** [Greg C. / savevsgames](https://github.com/savevsgames)
+- **Lead developer:** [Greg / savevsgames](https://github.com/savevsgames)
 - **StablePiggy platform:** [app.stablepiggy.com](https://app.stablepiggy.com)
 - **Foundry VTT:** [foundryvtt.com](https://foundryvtt.com)
 - **Pathfinder 2e system module:** [github.com/foundryvtt/pf2e](https://github.com/foundryvtt/pf2e)
