@@ -97,9 +97,10 @@ import { getAuthToken, getRelayEndpoint } from "./settings.js";
 
 /**
  * Minimal subset of Foundry's ChatMessage data we actually populate.
- * `CONST.CHAT_MESSAGE_STYLES` is a runtime enum that maps our protocol
- * chat kinds to Foundry's internal type ids (OOC, IC, EMOTE, WHISPER).
- * In v13 the values are 0, 1, 2, 4 respectively.
+ * In v13 there is no dedicated WHISPER style — a message is a whisper
+ * iff its `whisper` array is non-empty. The numeric ids in
+ * `CONST.CHAT_MESSAGE_STYLES` are the enum values for OTHER/OOC/IC/
+ * EMOTE (0-3).
  */
 interface FoundryChatMessageData {
   content: string;
@@ -110,11 +111,19 @@ interface FoundryChatMessageData {
   flags?: Record<string, Record<string, unknown>>;
 }
 
+interface FoundryChatMessage {
+  readonly id: string;
+  update(
+    data: Partial<FoundryChatMessageData>,
+    options?: Record<string, unknown>
+  ): Promise<unknown>;
+}
+
 declare const ChatMessage: {
   create(
     data: FoundryChatMessageData,
     options?: Record<string, unknown>
-  ): Promise<unknown>;
+  ): Promise<FoundryChatMessage | undefined>;
 };
 
 declare const CONST: {
@@ -129,6 +138,9 @@ declare const CONST: {
 declare const game: {
   users: {
     get(id: string): { id: string; isGM: boolean } | undefined;
+  };
+  messages: {
+    get(id: string): FoundryChatMessage | undefined;
   };
   user: { readonly id: string };
 };
@@ -178,6 +190,17 @@ export class RelayClient {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   /** ID of the most recent ping we sent — cleared when the matching pong arrives. */
   private pendingPingId: string | null = null;
+
+  /**
+   * Outstanding placeholder chat messages keyed by the correlationId
+   * the backend will echo back on the matching `backend.chat.create`.
+   * When a chat.create arrives with a known correlationId, the handler
+   * calls `message.update()` on the stored Foundry message id instead
+   * of creating a new chat entry — so the "Napoleon is thinking…"
+   * placeholder from chat-command.ts gets replaced in place. See
+   * chat-command.ts and the `handleChatCreate` method below.
+   */
+  private readonly pendingPlaceholders = new Map<string, string>();
 
   constructor(ctx: RelayClientContext) {
     this.ctx = ctx;
@@ -261,22 +284,49 @@ export class RelayClient {
   }
 
   /**
-   * Send a `client.query` to the relay. Returns false if the client is
-   * not in the connected state (the caller should surface an error to
-   * the GM rather than queuing — offline queuing is a Tier 2 feature).
-   *
-   * M3 includes this method for completeness and smoke-test use, but
-   * the full query path from the GM's `/napoleon` command lands in M5.
+   * Send a `client.query` to the relay. Returns the generated message
+   * id on success, or `null` if the client was not in the connected
+   * state and the message had to be dropped. The caller uses the
+   * returned id to register a placeholder under the same key — the
+   * backend echoes this id back as `correlationId` on its response,
+   * which is how M5's placeholder-replacement flow routes the inbound
+   * `backend.chat.create` to the right pending chat message.
    */
-  sendQuery(payload: ClientQueryPayload): boolean {
+  sendQuery(payload: ClientQueryPayload): string | null {
     if (this.status !== "connected" || !this.socket) {
       warn(`sendQuery called while status=${this.status} — dropping`);
-      return false;
+      return null;
     }
     const msg = makeMessage("client.query", payload);
     this.socket.send(JSON.stringify(msg));
-    debug(`→ client.query (sessionId=${payload.sessionId})`);
-    return true;
+    debug(`→ client.query (sessionId=${payload.sessionId}, id=${msg.id})`);
+    return msg.id;
+  }
+
+  /**
+   * Register a Foundry chat message id as the placeholder for a
+   * pending query. When the matching `backend.chat.create` arrives
+   * (keyed by `correlationId === queryId`), `handleChatCreate` will
+   * call `message.update()` on this id instead of creating a new
+   * chat entry. Called by chat-command.ts right after `sendQuery`.
+   */
+  registerPlaceholder(correlationId: string, foundryMessageId: string): void {
+    this.pendingPlaceholders.set(correlationId, foundryMessageId);
+  }
+
+  /**
+   * Remove a placeholder registration. Called by chat-command.ts's
+   * timeout path when it wants to claim the placeholder and replace
+   * its content with an error, preventing a race with a late-
+   * arriving real response.
+   */
+  unregisterPlaceholder(correlationId: string): void {
+    this.pendingPlaceholders.delete(correlationId);
+  }
+
+  /** True if a placeholder is still registered for this correlationId. */
+  hasPlaceholder(correlationId: string): boolean {
+    return this.pendingPlaceholders.has(correlationId);
   }
 
   /** Current connection status — useful for the future settings panel indicator. */
@@ -451,6 +501,40 @@ export class RelayClient {
       payload.type === "whisper"
         ? this.remapWhisperTargets(payload.whisperTo)
         : [];
+
+    // If this response carries a correlationId that matches a pending
+    // placeholder registered by chat-command.ts, replace the
+    // placeholder in place via ChatMessage.update() rather than
+    // creating a new chat entry. This is the M5 "Napoleon is
+    // thinking…" → real answer flip.
+    if (payload.correlationId && this.pendingPlaceholders.has(payload.correlationId)) {
+      const placeholderId = this.pendingPlaceholders.get(payload.correlationId)!;
+      this.pendingPlaceholders.delete(payload.correlationId);
+      const placeholder = game.messages.get(placeholderId);
+      if (placeholder) {
+        try {
+          await placeholder.update({
+            content: payload.content,
+            ...(payload.flavor ? { flavor: payload.flavor } : {}),
+          });
+          info(
+            `replaced placeholder ${placeholderId} with response (correlationId=${payload.correlationId})`
+          );
+          return;
+        } catch (err) {
+          logError(
+            `placeholder update failed, falling back to new message: ${err instanceof Error ? err.message : String(err)}`,
+            err
+          );
+          // fall through to ChatMessage.create so the GM still sees
+          // the response even if the in-place update blew up
+        }
+      } else {
+        debug(
+          `placeholder ${placeholderId} no longer exists (deleted?) — creating a new chat message`
+        );
+      }
+    }
 
     const data: FoundryChatMessageData = {
       content: payload.content,

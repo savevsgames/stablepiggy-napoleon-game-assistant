@@ -33,6 +33,7 @@ import { PROTOCOL_VERSION } from "@stablepiggy-napoleon/protocol";
 import { info, debug } from "./log.js";
 import { registerSettings } from "./settings.js";
 import { RelayClient, type RelayClientContext } from "./relay-client.js";
+import { registerChatCommand } from "./chat-command.js";
 
 const MODULE_ID = "stablepiggy-napoleon-game-assistant";
 const MODULE_VERSION = "0.0.1";
@@ -109,6 +110,13 @@ Hooks.once("ready", () => {
 
   relayClient = new RelayClient(ctx);
   relayClient.connect();
+
+  // M5: register the /napoleon chat command. The command fires
+  // whenever the GM types /napoleon <query> in the chat input,
+  // creates a "Napoleon is thinking…" placeholder, and dispatches
+  // the query via relayClient.sendQuery. See chat-command.ts for
+  // the full flow.
+  registerChatCommand(relayClient);
 });
 
 // Clean shutdown on Foundry world close / page unload. Foundry v13 fires
