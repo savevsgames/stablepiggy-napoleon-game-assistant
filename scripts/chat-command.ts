@@ -88,9 +88,18 @@ import { info, warn, error as logError, debug } from "./log.js";
 const MODULE_ID = "stablepiggy-napoleon-game-assistant";
 
 /** How long (ms) to wait for a backend response before replacing the
- *  placeholder with an error message. 15 seconds is generous enough for
- *  the real LLM call (M6/P3) while still feeling responsive. */
-const RESPONSE_TIMEOUT_MS = 15_000;
+ *  placeholder with an error message. 60 seconds accommodates the full
+ *  range of real backends:
+ *    - cloud providers (openai, anthropic, openrouter): 2-15s for a
+ *      typical PF2e rules question, occasionally longer for complex
+ *      generation tasks
+ *    - self-hosted Ollama on CPU with an 8B model: 20-45s for the same
+ *      query
+ *  Before P3 this was 15s (enough only for the canned P2 stub). The
+ *  ceiling is long enough that a real answer has room to arrive but
+ *  short enough that a genuinely stuck backend still surfaces as a
+ *  timeout instead of leaving the GM staring at "thinking…" forever. */
+const RESPONSE_TIMEOUT_MS = 60_000;
 
 // ── Foundry globals used by this file ──────────────────────────────────
 // Typed against Foundry VTT v13.351. See docs/foundry-conventions.md §2.
@@ -317,7 +326,7 @@ async function expireIfPending(
   warn(`/napoleon query timed out after ${RESPONSE_TIMEOUT_MS}ms (correlationId=${correlationId})`);
   await safeUpdate(placeholderMsgId, {
     content:
-      "<p><em>Napoleon: no response from the backend within 15 seconds. The relay or backend may be down.</em></p>",
+      `<p><em>Napoleon: no response from the backend within ${Math.round(RESPONSE_TIMEOUT_MS / 1000)} seconds. The relay or backend may be down, or your LLM provider is very slow — try a faster model via Pig Chat settings.</em></p>`,
   });
 }
 
