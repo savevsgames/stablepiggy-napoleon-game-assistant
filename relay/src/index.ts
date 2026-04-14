@@ -1,34 +1,68 @@
 /**
  * StablePiggy Napoleon Game Assistant — relay service entry point
  *
- * Pre-alpha stub (Step 0). Tier 1 build steps replace this with:
- *   - Step 2: WebSocket server (`ws` package), authentication middleware
- *     (Bearer token verification), ping/pong handling, hello/welcome handshake,
- *     structured logging via pino
- *   - Step 4: HTTP admin endpoint for the temporary fake backend
- *     (`POST /admin/inject-chat`) that lets us smoke-test command routing
- *     before the real AI backend is wired in
- *   - Step 6: replace fake backend with real HTTP calls to the StablePiggy
- *     platform's `POST /api/foundry/query` endpoint (delivered by the
- *     parallel Platform Track — see planning/phase2-tier1-plan.md §4.2)
- *   - Step 7: structured error handling, message queuing for offline clients,
- *     rate limiting per connection
- *   - Step 8a: Dockerfile and deployment artifacts
+ * Loads configuration from environment variables, starts the WebSocket
+ * relay server, and installs graceful-shutdown handlers for SIGINT/SIGTERM.
  *
- * See planning/phase2-tier1-plan.md §4.1 for the full Module Track build
- * sequence and §4.2 for the parallel Platform Track that delivers the
- * backend endpoint this relay calls.
+ * See planning/phase2-tier1-plan.md §4.1 Step 2 for the M2 scope and
+ * smoke-test procedure. See relay/README.md for deployment notes and
+ * relay/.env.example for the full list of supported environment variables.
  */
 
-import { PROTOCOL_VERSION } from "@stablepiggy-napoleon/protocol";
+import { loadConfig } from "./config.js";
+import { createLogger } from "./log.js";
+import { startServer } from "./server.js";
 
-// eslint-disable-next-line no-console
-console.log(
-  `[relay] stablepiggy-napoleon-game-assistant relay service — pre-alpha stub (protocol v${PROTOCOL_VERSION})`
-);
-// eslint-disable-next-line no-console
-console.log(
-  "[relay] functional WebSocket server lands in Tier 1 Step 2 — see relay/README.md"
+const config = loadConfig();
+const log = createLogger(config.logLevel);
+
+log.info(
+  {
+    nodeVersion: process.version,
+    logLevel: config.logLevel,
+  },
+  "relay starting"
 );
 
-process.exit(0);
+const server = startServer(config, log);
+
+// ── Graceful shutdown ──
+
+async function shutdown(signal: string): Promise<void> {
+  log.info({ signal }, "shutdown signal received");
+  try {
+    await server.close();
+    log.info("relay stopped cleanly");
+    process.exit(0);
+  } catch (err) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      "shutdown failed"
+    );
+    process.exit(1);
+  }
+}
+
+process.on("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+
+process.on("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
+
+process.on("uncaughtException", (err) => {
+  log.fatal(
+    { err: err.message, stack: err.stack },
+    "uncaught exception — exiting"
+  );
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log.fatal(
+    { reason: reason instanceof Error ? reason.message : String(reason) },
+    "unhandled promise rejection — exiting"
+  );
+  process.exit(1);
+});
