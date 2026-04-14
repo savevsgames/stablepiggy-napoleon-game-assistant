@@ -40,25 +40,40 @@
  * ## Inbound message dispatch
  *
  * Valid `relay.welcome` completes the handshake. `pong` is tracked for
- * the ping loop. `backend.chat.create` / `backend.actor.create` /
- * `backend.journal.create` are stubs in M3 — they just log receipt and
- * do nothing else. Full handlers land in M4 (chat.create) and M7
- * (actor/journal). `error` messages from the relay are logged at warn
- * level. Anything else is logged as unexpected.
+ * the ping loop. `backend.chat.create` (M4) calls Foundry's
+ * `ChatMessage.create()` to render the message in the world chat log.
+ * `backend.actor.create` / `backend.journal.create` are still stubs —
+ * full handlers land in M7 alongside the pf2e NPC schema validation.
+ * `error` messages from the relay are logged at warn level. Anything
+ * else is logged as unexpected.
  *
- * ## Out of scope for M3
+ * ## Whisper target mapping (M4)
+ *
+ * The backend puts the GM's StablePiggy identity id in
+ * `backend.chat.create.whisperTo` because that's the only identifier
+ * the relay/backend side knows about. Foundry's `ChatMessage.create()`
+ * `whisper` field expects Foundry **user** ids, which live only on the
+ * client. The `chat.create` handler remaps any whisperTo entry that
+ * isn't a known Foundry user id to the current GM's `game.user.id`.
+ * In Tier 1 this is always the same user (GM-only connection), but
+ * the heuristic is written to be robust to Tier 2 multi-user
+ * scenarios — unknown ids funnel to the current user rather than
+ * being silently dropped.
+ *
+ * ## Out of scope for M4
  *
  *   - `/napoleon` chat command (M5 adds this in chat-command.ts)
  *   - "Napoleon is thinking..." placeholder rendering (M5)
- *   - Correlation id tracking for in-flight queries (M4/M5)
- *   - Calling ChatMessage.create / Actor.create / JournalEntry.create
- *     on inbound commands (M4 / M7)
+ *   - Correlation id tracking for in-flight queries (M4/M5 — tracked
+ *     via the correlationId field on the payload, but M4 doesn't
+ *     dedupe or replace placeholders yet)
+ *   - Calling Actor.create / JournalEntry.create on inbound commands (M7)
  *   - Test Connection button in the settings panel (M7)
  *
- * Typed against Foundry VTT v13.351. The only Foundry global this file
- * touches is `WebSocket`, which is a standard browser global and is
- * provided by the DOM lib in tsconfig. No module-specific declares
- * needed.
+ * Typed against Foundry VTT v13.351. The `ChatMessage`, `game.users`,
+ * and `CONST` declarations at the bottom of this file cover only what
+ * the chat.create handler touches — extend in place for new Foundry
+ * calls in M5/M7 per docs/foundry-conventions.md §2.
  */
 
 import {
@@ -69,10 +84,54 @@ import {
   type ProtocolMessage,
   type ClientHelloPayload,
   type ClientQueryPayload,
+  type BackendChatCreatePayload,
 } from "@stablepiggy-napoleon/protocol";
 
 import { info, warn, error as logError, debug } from "./log.js";
 import { getAuthToken, getRelayEndpoint } from "./settings.js";
+
+// ── Foundry globals used by the chat.create handler ────────────────────
+// Typed against Foundry VTT v13.351. Kept minimal per
+// docs/foundry-conventions.md §2 — extend in place as more Foundry API
+// calls land in future milestones.
+
+/**
+ * Minimal subset of Foundry's ChatMessage data we actually populate.
+ * `CONST.CHAT_MESSAGE_STYLES` is a runtime enum that maps our protocol
+ * chat kinds to Foundry's internal type ids (OOC, IC, EMOTE, WHISPER).
+ * In v13 the values are 0, 1, 2, 4 respectively.
+ */
+interface FoundryChatMessageData {
+  content: string;
+  style: number;
+  speaker?: { alias?: string; actor?: string };
+  whisper?: readonly string[];
+  flavor?: string;
+  flags?: Record<string, Record<string, unknown>>;
+}
+
+declare const ChatMessage: {
+  create(
+    data: FoundryChatMessageData,
+    options?: Record<string, unknown>
+  ): Promise<unknown>;
+};
+
+declare const CONST: {
+  CHAT_MESSAGE_STYLES: {
+    OTHER: number;
+    OOC: number;
+    IC: number;
+    EMOTE: number;
+  };
+};
+
+declare const game: {
+  users: {
+    get(id: string): { id: string; isGM: boolean } | undefined;
+  };
+  user: { readonly id: string };
+};
 
 const MODULE_VERSION = "0.0.1";
 
@@ -273,11 +332,13 @@ export class RelayClient {
         this.onPong(message.payload.pingId);
         break;
       case "backend.chat.create":
+        void this.handleChatCreate(message.payload);
+        break;
       case "backend.actor.create":
       case "backend.journal.create":
-        // M3 stubs — log receipt and drop. M4 (chat) and M7 (actor/
-        // journal) replace these with real Foundry API calls.
-        info(`received ${message.kind} (handler lands in M4/M7)`);
+        // M7 stubs — log receipt and drop. Full handlers land in M7
+        // alongside the pf2e NPC schema validation.
+        info(`received ${message.kind} (handler lands in M7)`);
         break;
       case "error":
         warn(
@@ -347,6 +408,118 @@ export class RelayClient {
     } else {
       debug(`pong received for unexpected id ${pingId}`);
     }
+  }
+
+  // ── Foundry command handlers ────────────────────────────────────────
+
+  /**
+   * Render a `backend.chat.create` payload as a Foundry ChatMessage.
+   *
+   * In Foundry v13 there is no dedicated WHISPER style — a message is
+   * a whisper iff its `whisper` array is non-empty. We map the
+   * protocol's `type` field like this:
+   *
+   *   - "ic"      → style: IC,    whisper: []
+   *   - "ooc"     → style: OOC,   whisper: []
+   *   - "emote"   → style: EMOTE, whisper: []
+   *   - "whisper" → style: OTHER, whisper: [remapped user ids]
+   *
+   * ## Whisper target remapping
+   *
+   * The backend populates `whisperTo` with StablePiggy identity ids
+   * (UUIDs for api-key auth, `anon:<world>:<gm>` strings for shared-
+   * secret auth). Neither is a valid Foundry user id. We remap each
+   * entry: if `game.users.get(entry)` resolves to a real Foundry user
+   * we keep it (future-proofing for Tier 2); otherwise we assume the
+   * backend is trying to whisper to this GM and substitute
+   * `game.user.id`.
+   *
+   * If the remap produces an empty array we drop the whisper flag
+   * entirely and send the message as OTHER-visible rather than ending
+   * up with a whisper-to-nobody (which in Foundry silently drops the
+   * message).
+   *
+   * Correlation id tracking for replacing the M5 "Napoleon is
+   * thinking..." placeholder lands in M5. M4 just renders the
+   * message directly.
+   */
+  private async handleChatCreate(
+    payload: BackendChatCreatePayload
+  ): Promise<void> {
+    const style = this.mapChatStyle(payload.type);
+    const whisper =
+      payload.type === "whisper"
+        ? this.remapWhisperTargets(payload.whisperTo)
+        : [];
+
+    const data: FoundryChatMessageData = {
+      content: payload.content,
+      style,
+      speaker: { ...(payload.speaker.alias ? { alias: payload.speaker.alias } : {}) },
+      ...(whisper.length > 0 ? { whisper } : {}),
+      ...(payload.flavor ? { flavor: payload.flavor } : {}),
+      flags: {
+        "stablepiggy-napoleon-game-assistant": {
+          ...(payload.correlationId ? { correlationId: payload.correlationId } : {}),
+        },
+      },
+    };
+
+    try {
+      await ChatMessage.create(data);
+      info(
+        `rendered backend.chat.create (type=${payload.type}, whisper=${whisper.length}, correlationId=${payload.correlationId ?? "none"})`
+      );
+    } catch (err) {
+      logError(
+        `ChatMessage.create failed for backend.chat.create: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    }
+  }
+
+  private mapChatStyle(type: BackendChatCreatePayload["type"]): number {
+    switch (type) {
+      case "ic":
+        return CONST.CHAT_MESSAGE_STYLES.IC;
+      case "ooc":
+        return CONST.CHAT_MESSAGE_STYLES.OOC;
+      case "emote":
+        return CONST.CHAT_MESSAGE_STYLES.EMOTE;
+      case "whisper":
+        // Whispers have no dedicated style in v13; OTHER + non-empty
+        // whisper array is the canonical representation.
+        return CONST.CHAT_MESSAGE_STYLES.OTHER;
+    }
+  }
+
+  private remapWhisperTargets(whisperTo: readonly string[]): string[] {
+    const selfId = this.ctx.gmUserId;
+    const result: string[] = [];
+    let substituted = 0;
+
+    for (const entry of whisperTo) {
+      // If the entry is a real Foundry user id, keep it as-is. Tier 2
+      // multi-user flows will rely on this branch once the backend
+      // starts emitting real Foundry user ids for per-player whispers.
+      if (game.users.get(entry)) {
+        result.push(entry);
+        continue;
+      }
+      // Otherwise assume the backend sent a StablePiggy identity id
+      // meant for the authenticated GM. Substitute this user's id.
+      if (!result.includes(selfId)) {
+        result.push(selfId);
+      }
+      substituted++;
+    }
+
+    if (substituted > 0) {
+      debug(
+        `whisper remap: substituted ${substituted} non-foundry ids with self (${selfId})`
+      );
+    }
+    return result;
   }
 
   // ── Timers ──────────────────────────────────────────────────────────
