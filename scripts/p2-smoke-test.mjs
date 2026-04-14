@@ -33,9 +33,9 @@ const TEST_SESSION_ID = `smoke-${Date.now()}`;
 
 function makeMessage(kind, payload) {
   return {
-    protocolVersion: 1,
-    messageId: randomUUID(),
-    timestamp: Date.now(),
+    v: 1,
+    id: randomUUID(),
+    ts: Date.now(),
     kind,
     payload,
   };
@@ -57,8 +57,11 @@ const timeout = setTimeout(() => {
 ws.on("open", () => {
   console.log(`[${Date.now() - startedAt}ms] connected to ${RELAY_URL}`);
   const hello = makeMessage("client.hello", {
-    identityId: TEST_IDENTITY_ID,
+    protocolVersion: 1,
     worldId: TEST_WORLD_ID,
+    gmUserId: TEST_IDENTITY_ID,
+    isPrimaryGM: true,
+    moduleVersion: "0.0.1",
     capabilities: {
       chatCreate: true,
       actorCreate: true,
@@ -68,7 +71,7 @@ ws.on("open", () => {
       foundryVersion: "13.351",
     },
   });
-  console.log(`[${Date.now() - startedAt}ms] → client.hello (identity=${TEST_IDENTITY_ID})`);
+  console.log(`[${Date.now() - startedAt}ms] → client.hello (gmUserId=${TEST_IDENTITY_ID})`);
   ws.send(JSON.stringify(hello));
 });
 
