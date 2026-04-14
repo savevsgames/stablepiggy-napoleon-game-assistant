@@ -160,12 +160,44 @@ export interface ClientCapabilities {
 /**
  * Payload for `client.hello`. The module sends this as the first message
  * after the WebSocket connection opens. The relay verifies the protocol
- * version and responds with `relay.welcome` on success or an `error`
- * message on failure.
+ * version AND the `authToken` before promoting the connection from pending
+ * to authenticated, and responds with `relay.welcome` on success or an
+ * `error` message (followed by close 1008) on failure.
+ *
+ * **Authentication model.** Browsers cannot set custom HTTP headers on the
+ * WebSocket upgrade request, so the relay cannot read an `Authorization`
+ * header from the upgrade handshake. Instead, authentication is carried
+ * inline as `authToken` in the first protocol message. The relay accepts
+ * all upgrades, starts a short grace timer, and verifies the token when
+ * the hello arrives. The relay has two auth modes selected per-token by
+ * prefix:
+ *
+ * - Tokens beginning with `dv-` are StablePiggy API keys. The relay
+ *   forwards them to the backend's identity endpoint to resolve the real
+ *   `identityId` for the GM, which unlocks vault, campaign memory, and
+ *   metering on every subsequent query in this connection.
+ * - Any other non-empty string is treated as a shared secret and compared
+ *   against the relay's configured `RELAY_SHARED_SECRET`. On success the
+ *   relay constructs a synthetic anonymous identity (`anon:<worldId>:
+ *   <gmUserId>`) and uses it for backend calls. Anonymous identities
+ *   have no vault access, no persistent memory, and no metering — the
+ *   upgrade path to an account is literally just "paste a dv- key here
+ *   instead."
+ *
+ * Hosted relay instances can set `RELAY_REQUIRE_API_KEY=true` to reject
+ * non-`dv-` tokens at hello time (so only StablePiggy account holders can
+ * use the shared hosted relay). Self-hosted relays leave that flag off.
  */
 export interface ClientHelloPayload {
   /** Protocol version the module speaks (should equal `PROTOCOL_VERSION`). */
   readonly protocolVersion: ProtocolVersion;
+  /**
+   * Relay auth token. Either a StablePiggy API key (starts with `dv-`) or
+   * an arbitrary shared secret matching the relay's `RELAY_SHARED_SECRET`.
+   * The relay closes the connection with code 1008 if this token is
+   * missing, malformed, or fails verification.
+   */
+  readonly authToken: string;
   /** Foundry world ID the module is running in. */
   readonly worldId: string;
   /** Foundry user ID of the GM running the module (must be a GM). */
@@ -449,6 +481,7 @@ export function makeMessageId(): string {
  * const msg = makeMessage("ping", {});
  * const hello = makeMessage("client.hello", {
  *   protocolVersion: PROTOCOL_VERSION,
+ *   authToken: "dv-...",           // or shared secret
  *   worldId: "my-world",
  *   gmUserId: "user-123",
  *   isPrimaryGM: true,
@@ -566,6 +599,7 @@ function validateHelloPayload(
   correlationId: string
 ): void {
   assert(payload.protocolVersion === PROTOCOL_VERSION, "payload.protocolVersion", `equals ${PROTOCOL_VERSION}`, correlationId);
+  assert(isNonEmptyString(payload.authToken), "payload.authToken", "non-empty string", correlationId);
   assert(isNonEmptyString(payload.worldId), "payload.worldId", "non-empty string", correlationId);
   assert(isNonEmptyString(payload.gmUserId), "payload.gmUserId", "non-empty string", correlationId);
   assert(typeof payload.isPrimaryGM === "boolean", "payload.isPrimaryGM", "boolean", correlationId);

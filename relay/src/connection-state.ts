@@ -1,20 +1,46 @@
 /**
  * Per-connection state stored by the relay for every open WebSocket.
  *
- * The `helloCompleted` flag gates query handling — queries arriving on a
- * connection that has not finished its hello handshake are rejected with a
- * protocol `error` message. `identityId`, `worldId`, and `capabilities` are
- * populated from `client.hello` and used by the backend HTTP client when
- * forwarding queries to the Foundry query endpoint.
+ * ## Lifecycle
  *
- * `sessionId` is NOT stored per-connection — it lives on each
- * `client.query` payload and is read/forwarded on a per-message basis. See
- * BACKEND-API-SPEC.md §2.5 in the platform repo for the full contract.
+ * A connection has two lifecycle phases:
+ *
+ *   1. **Pending** (`helloCompleted === false`). The WebSocket upgrade has
+ *      succeeded but no valid `client.hello` has been processed yet. A 2-
+ *      second grace timer runs in parallel; if it fires before hello
+ *      arrives, the server closes the socket with code 1008 ("auth
+ *      required"). During this phase `identityId`, `worldId`, etc. are
+ *      undefined and no queries are accepted.
+ *
+ *   2. **Authenticated** (`helloCompleted === true`). The relay has
+ *      received a valid hello, verified its `authToken`, and populated the
+ *      identity/world/capabilities fields. The grace timer has been
+ *      cleared. Queries are now accepted on this connection and forwarded
+ *      to the backend with the stored `identityId`.
+ *
+ * The auth token verification in the hello handler determines `identityId`
+ * in one of two ways:
+ *
+ *   - **API-key mode** (`authMode === "apikey"`): the token starts with
+ *     `dv-`, the relay calls the backend's identity resolution endpoint,
+ *     and the real StablePiggy identity ID comes back. This unlocks vault
+ *     access, campaign memory, and metering on every query.
+ *
+ *   - **Anonymous mode** (`authMode === "anonymous"`): the token matches
+ *     the relay's configured `RELAY_SHARED_SECRET`, and the relay
+ *     synthesizes a synthetic identity (`anon:<worldId>:<gmUserId>`). The
+ *     backend accepts any non-empty string for identityId and logs against
+ *     it, but no vault, no memory, no per-user metering. The upgrade path
+ *     to a real account is literally "paste a dv- key here instead."
+ *
+ * See BACKEND-API-SPEC.md §2.5 in the platform repo for the full contract.
  */
 
 import type { WebSocket } from "ws";
 import type { ClientCapabilities } from "@stablepiggy-napoleon/protocol";
 import { makeMessageId } from "@stablepiggy-napoleon/protocol";
+
+export type AuthMode = "apikey" | "anonymous";
 
 export interface ConnectionState {
   /** Unique connection ID generated at accept time. Used as Map key. */
@@ -26,9 +52,24 @@ export interface ConnectionState {
   /** Timestamp when the connection was accepted. */
   readonly connectedAt: number;
 
-  /** True once a valid `client.hello` has been processed. */
+  /** True once a valid `client.hello` has been processed and auth verified. */
   helloCompleted: boolean;
-  /** GM's StablePiggy identity ID — populated from hello.payload.gmUserId. */
+  /**
+   * Handle for the pending-auth grace timer. Set at accept time, cleared
+   * when hello is successfully processed, fires a 1008 close if hello does
+   * not arrive in time.
+   */
+  helloGraceTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * How this connection was authenticated. Undefined while pending, set
+   * to "apikey" or "anonymous" after successful hello verification.
+   */
+  authMode?: AuthMode;
+  /**
+   * Identity ID used when forwarding queries to the backend. In API-key
+   * mode this is the real StablePiggy identity. In anonymous mode this
+   * is a synthetic value constructed from world and GM user IDs.
+   */
   identityId?: string;
   /** Foundry world ID — populated from hello.payload.worldId. */
   worldId?: string;
@@ -62,6 +103,10 @@ export function registerConnection(
 }
 
 export function unregisterConnection(id: string): void {
+  const state = connections.get(id);
+  if (state?.helloGraceTimer) {
+    clearTimeout(state.helloGraceTimer);
+  }
   connections.delete(id);
 }
 

@@ -97,6 +97,7 @@ function section(name: string): void {
 function validHelloPayload(): ClientHelloPayload {
   return {
     protocolVersion: PROTOCOL_VERSION,
+    authToken: "dev-test-secret-do-not-ship",
     worldId: "blood-lords-test",
     gmUserId: "user-abc123",
     isPrimaryGM: true,
@@ -220,6 +221,21 @@ section("client.hello");
   assertRejects(
     "rejects hello missing worldId",
     makeMessage("client.hello", missingWorldId as unknown as ClientHelloPayload),
+    "validation_failed"
+  );
+
+  const missingAuthToken = validHelloPayload() as unknown as Record<string, unknown>;
+  delete missingAuthToken.authToken;
+  assertRejects(
+    "rejects hello missing authToken",
+    makeMessage("client.hello", missingAuthToken as unknown as ClientHelloPayload),
+    "validation_failed"
+  );
+
+  const emptyAuthToken = validHelloPayload();
+  assertRejects(
+    "rejects hello with empty authToken",
+    makeMessage("client.hello", { ...emptyAuthToken, authToken: "" }),
     "validation_failed"
   );
 

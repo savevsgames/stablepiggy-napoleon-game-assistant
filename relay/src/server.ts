@@ -1,21 +1,33 @@
 /**
  * WebSocket server for the StablePiggy Napoleon Game Assistant relay.
  *
- * Responsibilities (M2 scope):
- *   - Accept WebSocket upgrade requests with `Authorization: Bearer` auth
+ * Responsibilities (M2.1 scope):
+ *   - Accept all WebSocket upgrade requests without auth (browsers cannot
+ *     set custom headers on the upgrade, so auth moved into the protocol
+ *     message layer — see auth.ts for the rationale)
+ *   - Start a 2-second grace timer on every new connection; close with
+ *     code 1008 if a valid hello has not arrived by then
  *   - Parse inbound frames as JSON, validate via the M1 protocol runtime guard
  *   - Dispatch messages to per-kind handlers
- *   - Maintain per-connection state (identityId/worldId/capabilities from hello)
- *   - Respond to client.hello with relay.welcome
+ *   - In the hello handler, verify `authToken` via one of two paths:
+ *       * tokens starting with `dv-`: call the backend identity endpoint
+ *         to resolve the real StablePiggy identity ID
+ *       * any other non-empty string: compare against `RELAY_SHARED_SECRET`
+ *         in constant time and synthesize `anon:<worldId>:<gmUserId>`
+ *   - Reject (close 1008) on: malformed hello, auth token verification
+ *     failure, API-key resolution failure, or `RELAY_REQUIRE_API_KEY=true`
+ *     combined with a non-dv token
+ *   - Maintain per-connection state (identityId/worldId/capabilities/authMode)
+ *   - Respond to client.hello with relay.welcome on success
  *   - Respond to ping with pong
- *   - Forward client.query to the backend HTTP client (M2 stub or live P2+)
+ *   - Forward client.query to the backend HTTP client (stub or live)
  *   - Reject queries on connections that have not completed hello
  *   - Emit a /health JSON endpoint on the same HTTP server for liveness checks
  *
- * Out of scope for M2 (deferred to later steps):
+ * Out of scope for M2.1 (deferred to later steps):
  *   - Offline message queueing (M7 / Tier 2)
  *   - Rate limiting at the relay layer (Tier 2)
- *   - Per-user auth tokens (Tier 2)
+ *   - Per-user issued session tokens (Tier 2)
  *   - Server-initiated pings (application-level keepalive, currently
  *     client-initiated only)
  *   - Reconnection state recovery (Tier 2)
@@ -37,16 +49,28 @@ import {
 
 import type { Config } from "./config.js";
 import type { Logger } from "./log.js";
-import { verifyBearerAuth } from "./auth.js";
+import { verifyHelloToken, looksLikeApiKey } from "./auth.js";
 import {
   registerConnection,
   unregisterConnection,
   connectionCount,
   type ConnectionState,
 } from "./connection-state.js";
-import { forwardQueryToBackend } from "./backend-client.js";
+import {
+  forwardQueryToBackend,
+  resolveIdentityFromApiKey,
+} from "./backend-client.js";
 
 const RELAY_VERSION = "0.0.1";
+
+/**
+ * How long a pending connection has to send a valid client.hello before
+ * the relay closes it with 1008. Deliberately short — the GM's client
+ * will normally send hello within the first millisecond after the
+ * WebSocket opens, so 2 seconds is generous. Attackers get no useful
+ * work out of a connection in this window.
+ */
+const HELLO_GRACE_MS = 2000;
 
 export interface ServerHandle {
   close(): Promise<void>;
@@ -56,18 +80,15 @@ export function startServer(config: Config, log: Logger): ServerHandle {
   const httpServer = createServer();
   const wss = new WebSocketServer({ noServer: true });
 
-  // ── HTTP upgrade: auth before establishing the WebSocket ──
+  // ── HTTP upgrade: accept unconditionally ──
+  //
+  // Auth used to live here as a Bearer-header check, but browser WebSocket
+  // clients cannot set custom headers on the upgrade request. The relay
+  // now accepts every upgrade and enforces auth via the inbound
+  // client.hello message (see handleHello). A grace timer on each
+  // connection prevents clients from sitting in the pending state forever.
 
   httpServer.on("upgrade", (req, socket, head) => {
-    if (!verifyBearerAuth(req, config.sharedSecret)) {
-      log.warn(
-        { remoteAddress: req.socket.remoteAddress, url: req.url },
-        "rejected unauthorized WebSocket upgrade"
-      );
-      socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
-      socket.destroy();
-      return;
-    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
     });
@@ -80,7 +101,24 @@ export function startServer(config: Config, log: Logger): ServerHandle {
     const state = registerConnection(socket, remoteAddress);
     const connLog = log.child({ connId: state.id, remoteAddress });
 
-    connLog.info({ totalConnections: connectionCount() }, "client connected");
+    // Start the pending-auth grace timer. If hello doesn't land in time,
+    // close with 1008. Successful hello clears this timer inside the
+    // handleHello path.
+    state.helloGraceTimer = setTimeout(() => {
+      if (!state.helloCompleted) {
+        connLog.warn(
+          { graceMs: HELLO_GRACE_MS },
+          "no client.hello received within grace window — closing"
+        );
+        try {
+          state.socket.close(1008, "auth required");
+        } catch {
+          // socket may already be closing; ignore
+        }
+      }
+    }, HELLO_GRACE_MS);
+
+    connLog.info({ totalConnections: connectionCount() }, "client connected (pending auth)");
 
     socket.on("message", (data: Buffer) => {
       state.lastActivityAt = Date.now();
@@ -135,6 +173,9 @@ export function startServer(config: Config, log: Logger): ServerHandle {
         port: config.port,
         bindAddress: config.bindAddress,
         backendUrl: config.backendUrl || "(stub mode)",
+        backendIdentityUrl: config.backendIdentityUrl || "(none)",
+        sharedSecretMode: config.sharedSecret.length > 0 && !config.requireApiKey,
+        requireApiKey: config.requireApiKey,
         version: RELAY_VERSION,
         protocolVersion: PROTOCOL_VERSION,
       },
@@ -182,7 +223,7 @@ async function handleMessage(
   try {
     switch (message.kind) {
       case "client.hello":
-        await handleHello(state, message, log);
+        await handleHello(state, message, config, log);
         break;
       case "ping":
         handlePing(state, message);
@@ -233,6 +274,7 @@ async function handleMessage(
 async function handleHello(
   state: ConnectionState,
   message: ClientHelloMessage,
+  config: Config,
   log: Logger
 ): Promise<void> {
   if (message.payload.protocolVersion !== PROTOCOL_VERSION) {
@@ -253,20 +295,85 @@ async function handleHello(
     return;
   }
 
-  // Store per-connection state per BACKEND-API-SPEC.md §2.5. These values
-  // are the source of truth for every subsequent client.query on this
-  // connection — the backend HTTP client reads them when constructing the
-  // request body.
+  const { authToken, worldId, gmUserId, isPrimaryGM, moduleVersion, capabilities } =
+    message.payload;
+
+  // ── Dual-mode auth: API key or shared secret ──
+  //
+  // The token prefix discriminates. `dv-` tokens are StablePiggy API
+  // keys and get resolved via the backend identity endpoint, unlocking
+  // vault/memory/metering for the real identity. Anything else is
+  // treated as a shared secret and matched against config.sharedSecret
+  // in constant time, producing a synthetic anonymous identity.
+  //
+  // Hosted relay deployments can set RELAY_REQUIRE_API_KEY=true to
+  // force the API-key path and reject shared-secret auth at hello time.
+
+  let resolvedIdentityId: string;
+  let authMode: "apikey" | "anonymous";
+
+  if (looksLikeApiKey(authToken)) {
+    // API-key path: ask the backend who owns this key.
+    try {
+      const resolved = await resolveIdentityFromApiKey(authToken, config, log);
+      resolvedIdentityId = resolved.identityId;
+      authMode = "apikey";
+      log.info(
+        { identityId: resolvedIdentityId, role: resolved.role, orgId: resolved.orgId },
+        "api-key auth succeeded"
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown identity error";
+      log.warn({ err: msg }, "api-key auth failed — closing connection");
+      sendError(state, "unauthorized", `api key rejected: ${msg}`, message.id);
+      state.socket.close(1008, "unauthorized");
+      return;
+    }
+  } else {
+    // Shared-secret path: reject outright if the operator has locked
+    // this relay to API keys only, or if no secret is configured.
+    if (config.requireApiKey) {
+      log.warn("shared-secret auth attempted on api-key-only relay — closing");
+      sendError(
+        state,
+        "unauthorized",
+        "this relay requires a StablePiggy API key (tokens must start with dv-)",
+        message.id
+      );
+      state.socket.close(1008, "unauthorized");
+      return;
+    }
+    if (!verifyHelloToken(authToken, config.sharedSecret)) {
+      log.warn("shared-secret auth failed — closing");
+      sendError(state, "unauthorized", "invalid shared secret", message.id);
+      state.socket.close(1008, "unauthorized");
+      return;
+    }
+    resolvedIdentityId = `anon:${worldId}:${gmUserId}`;
+    authMode = "anonymous";
+    log.info({ identityId: resolvedIdentityId }, "shared-secret auth succeeded");
+  }
+
+  // Auth cleared — clear the grace timer and populate the full
+  // connection state. From here on this connection is authenticated
+  // and can accept queries.
+  if (state.helloGraceTimer) {
+    clearTimeout(state.helloGraceTimer);
+    state.helloGraceTimer = undefined;
+  }
+
   state.helloCompleted = true;
-  state.identityId = message.payload.gmUserId;
-  state.worldId = message.payload.worldId;
-  state.isPrimaryGM = message.payload.isPrimaryGM;
-  state.moduleVersion = message.payload.moduleVersion;
-  state.capabilities = message.payload.capabilities;
+  state.authMode = authMode;
+  state.identityId = resolvedIdentityId;
+  state.worldId = worldId;
+  state.isPrimaryGM = isPrimaryGM;
+  state.moduleVersion = moduleVersion;
+  state.capabilities = capabilities;
 
   log.info(
     {
       identityId: state.identityId,
+      authMode: state.authMode,
       worldId: state.worldId,
       moduleVersion: state.moduleVersion,
       isPrimaryGM: state.isPrimaryGM,
@@ -274,16 +381,15 @@ async function handleHello(
       systemVersion: state.capabilities?.systemVersion,
       foundryVersion: state.capabilities?.foundryVersion,
     },
-    "hello received, connection state populated"
+    "hello received, connection authenticated"
   );
 
   const welcome = makeMessage("relay.welcome", {
     protocolVersion: PROTOCOL_VERSION,
     relayVersion: RELAY_VERSION,
-    // M6 will replace this with a real backend health check. For M2 we
-    // report true if the backend URL is configured, false otherwise.
-    // (Reading config here would require passing it in — left for M6.)
-    backendAvailable: true,
+    // Report true if the backend URL is configured, false otherwise.
+    // A future milestone can replace this with a real health check.
+    backendAvailable: config.backendUrl.length > 0,
     serverTime: Date.now(),
   });
   sendMessage(state, welcome);

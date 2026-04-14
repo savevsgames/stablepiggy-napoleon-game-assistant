@@ -1,37 +1,62 @@
 /**
- * Shared-secret Bearer token verification for WebSocket upgrade requests.
+ * Relay authentication helpers.
  *
- * The Foundry module sends `Authorization: Bearer <RELAY_SHARED_SECRET>` on
- * the WebSocket upgrade request. The relay verifies the token using
- * constant-time comparison to prevent timing side-channels on the secret.
+ * ## Why the auth moved into the protocol message
  *
- * This is intentionally simple — one shared secret for all connected clients
- * in Tier 1. Tier 2+ will add per-user issued tokens verified against a
- * backend account lookup.
+ * Earlier drafts of the relay verified a Bearer token in the HTTP upgrade
+ * request's `Authorization` header. That worked for the Node-based smoke
+ * test (the `ws` package supports custom headers on its client) but is
+ * fundamentally broken for the Foundry module because the browser
+ * WebSocket API **cannot set custom HTTP headers on the upgrade request**.
+ * The only thing a browser can influence about the upgrade is the URL and
+ * the subprotocol list — neither suitable for carrying a secret.
+ *
+ * M2.1 moved authentication into the first protocol message instead. The
+ * relay now accepts all upgrades, starts a 2-second grace timer, and
+ * verifies `authToken` in the inbound `client.hello` payload. If the hello
+ * never arrives or the token is rejected, the relay closes the socket with
+ * code 1008 ("policy violation"). The grace window is short enough that an
+ * attacker gets essentially no free work out of the pending state, and
+ * the connection has consumed no resources beyond a single Map entry and
+ * a timer handle.
+ *
+ * The relay supports two auth paths, selected by token prefix in the hello
+ * handler:
+ *
+ *   - **API key** (`dv-*`): forwarded to the backend's identity endpoint
+ *     via HTTP. The backend runs the standard `authenticate()` path used
+ *     by every MCP tool call and returns the real identity ID on success.
+ *     See `resolveIdentityFromApiKey` in backend-client.ts.
+ *
+ *   - **Shared secret**: any other non-empty string. Compared in constant
+ *     time against `config.sharedSecret` using the helper below. On match
+ *     the relay synthesizes an anonymous identity from the hello payload.
+ *
+ * This file only owns the string-compare helper. The flow control (which
+ * path to take, when to close the socket, how to set connection state) is
+ * in server.ts::handleHello.
  */
 
 import { timingSafeEqual } from "crypto";
-import type { IncomingMessage } from "http";
-
-const BEARER_PREFIX = "Bearer ";
 
 /**
- * Verify that `req`'s Authorization header carries a Bearer token matching
- * `expected`. Uses constant-time comparison. Returns false for any failure:
- * missing header, malformed header, length mismatch, or comparison failure.
+ * Constant-time compare of a user-supplied token against the relay's
+ * configured shared secret. Returns false for any failure: empty input,
+ * length mismatch, buffer allocation error, or non-match.
+ *
+ * Empty `expected` is treated as "shared-secret mode is disabled" — this
+ * function always returns false, so shared-secret auth attempts fail
+ * cleanly when the operator hasn't configured a secret. That's the right
+ * posture for hosted relay deployments that only want to accept API keys.
  */
-export function verifyBearerAuth(req: IncomingMessage, expected: string): boolean {
-  const header = req.headers["authorization"];
-  if (typeof header !== "string" || !header.startsWith(BEARER_PREFIX)) {
+export function verifyHelloToken(token: string, expected: string): boolean {
+  if (typeof token !== "string" || typeof expected !== "string") {
     return false;
   }
-  const token = header.slice(BEARER_PREFIX.length).trim();
+  if (expected.length === 0) {
+    return false;
+  }
   if (token.length !== expected.length) {
-    // Length mismatch — fail fast. We still pay the cost of allocating a
-    // buffer for the short one to keep this branch's timing roughly similar
-    // to the success path, but timing on "wrong length" is not considered
-    // sensitive (the length of the real secret is not a secret — only its
-    // contents are).
     return false;
   }
   try {
@@ -44,4 +69,18 @@ export function verifyBearerAuth(req: IncomingMessage, expected: string): boolea
   } catch {
     return false;
   }
+}
+
+/**
+ * True if the token looks like a StablePiggy API key. Used by the hello
+ * handler to decide whether to route to the API-key path or the shared-
+ * secret path. The relay does not validate the rest of the key format
+ * here — the backend's `authenticate()` is authoritative. This is just
+ * the routing discriminator.
+ *
+ * Keeping this as a function (not an inline check) so that if the API
+ * key format ever changes the relay has one place to update.
+ */
+export function looksLikeApiKey(token: string): boolean {
+  return typeof token === "string" && token.startsWith("dv-");
 }

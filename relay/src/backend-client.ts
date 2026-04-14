@@ -168,3 +168,102 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+// ── Identity resolution (M2.1) ──────────────────────────────────────────
+//
+// When a GM authenticates with a StablePiggy API key (any `authToken` in
+// client.hello starting with `dv-`), the relay calls this function to
+// resolve the key to a real identity via the backend's identity endpoint.
+// The backend runs its standard `authenticate()` path — the same code
+// that guards every MCP tool call — and returns the canonical identity
+// ID on success or 401 on failure.
+//
+// The request sends the GM's raw API key as the relay's own
+// Authorization: Bearer header. The relay's service token
+// (RELAY_BACKEND_TOKEN) is NOT involved here — the identity endpoint is
+// API-key authenticated, not service authenticated, because any holder
+// of a valid dv- key can already identify themselves via the MCP path.
+// See dashboard/routes/foundry-identity.ts in the platform repo for the
+// full rationale.
+
+export interface ResolvedRemoteIdentity {
+  identityId: string;
+  role: string;
+  orgId: string | null;
+}
+
+/**
+ * Call the backend's identity endpoint to resolve a StablePiggy API key
+ * to an identity. Throws on any failure — callers in the hello handler
+ * should catch and close the socket with 1008.
+ */
+export async function resolveIdentityFromApiKey(
+  apiKey: string,
+  config: Config,
+  log: Logger
+): Promise<ResolvedRemoteIdentity> {
+  if (!config.backendIdentityUrl) {
+    throw new Error(
+      "backend identity URL is not configured (set RELAY_BACKEND_URL or RELAY_BACKEND_IDENTITY_URL)"
+    );
+  }
+
+  const startedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(config.backendIdentityUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Authorization: `Bearer ${apiKey}`,
+        "X-Relay-Version": RELAY_VERSION,
+      },
+      // The endpoint ignores the body but some HTTP stacks complain
+      // about POST without a Content-Length, so send an empty JSON
+      // object to keep everyone happy.
+      body: "{}",
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown fetch error";
+    throw new Error(`identity endpoint unreachable: ${msg}`);
+  }
+
+  const durationMs = Date.now() - startedAt;
+
+  if (response.status === 401) {
+    throw new Error("invalid api key");
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => "<unreadable>");
+    throw new Error(
+      `identity endpoint returned HTTP ${response.status} in ${durationMs}ms: ${text.slice(
+        0,
+        200
+      )}`
+    );
+  }
+
+  const parsed = (await response.json()) as {
+    identityId?: unknown;
+    role?: unknown;
+    orgId?: unknown;
+  };
+  if (typeof parsed.identityId !== "string" || parsed.identityId.length === 0) {
+    throw new Error("identity endpoint returned malformed body (no identityId)");
+  }
+
+  log.debug(
+    {
+      identityId: parsed.identityId,
+      role: parsed.role,
+      durationMs,
+    },
+    "identity resolved from api key"
+  );
+
+  return {
+    identityId: parsed.identityId,
+    role: typeof parsed.role === "string" ? parsed.role : "unknown",
+    orgId: typeof parsed.orgId === "string" ? parsed.orgId : null,
+  };
+}
