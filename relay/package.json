@@ -1,0 +1,21 @@
+{
+  "name": "@stablepiggy-napoleon/relay",
+  "version": "0.0.1",
+  "private": true,
+  "description": "WebSocket relay service bridging the StablePiggy Napoleon Game Assistant Foundry module and the StablePiggy AI backend.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stablepiggy-napoleon/protocol": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2"
+  }
+}

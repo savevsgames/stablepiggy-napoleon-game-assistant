@@ -1,0 +1,19 @@
+{
+  "name": "@stablepiggy-napoleon/module",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Foundry VTT client module for the StablePiggy Napoleon Game Assistant. Built with Vite, output goes to ../dist/scripts/.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stablepiggy-napoleon/protocol": "*"
+  },
+  "devDependencies": {
+    "vite": "^6.0.5"
+  }
+}

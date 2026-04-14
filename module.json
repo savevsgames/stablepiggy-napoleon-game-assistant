@@ -23,7 +23,7 @@
   "bugs": "https://github.com/savevsgames/stablepiggy-napoleon-game-assistant/issues",
   "license": "MIT",
   "esmodules": [
-    "scripts/main.js"
+    "dist/scripts/main.js"
   ],
   "styles": [
     "styles/module.css"
