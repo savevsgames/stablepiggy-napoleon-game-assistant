@@ -8,8 +8,10 @@
   "main": "./dist/index.js",
   "scripts": {
     "build": "tsc",
+    "build:bundle": "tsc && esbuild dist/index.js --bundle --platform=node --target=node22 --format=esm --outfile=dist/bundle.js --external:ws --external:pino --external:pino-pretty --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
     "dev": "tsc --watch",
     "start": "node --env-file=.env dist/index.js",
+    "start:bundle": "node --env-file=.env dist/bundle.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -20,6 +22,7 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.2",
     "pino-pretty": "^13.0.0"
   }
 }
