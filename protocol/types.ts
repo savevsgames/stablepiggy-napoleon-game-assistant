@@ -1,24 +1,35 @@
 /**
- * Protocol v1 — message types
+ * Protocol v1 — message types and runtime validation
  *
- * Step 0 (current): ships the version constant and an empty type space so the
- * protocol package builds cleanly and the module and relay can import from it
- * without errors.
+ * This file is the SINGLE source of truth for the WebSocket message contract
+ * between the StablePiggy Napoleon Game Assistant Foundry module and the
+ * relay service. Both packages import from here. Adding a new message kind
+ * requires updating this file and implementing handlers in BOTH the module
+ * (../scripts) and the relay (../relay/src). TypeScript's discriminated
+ * union narrowing will catch any drift between them at compile time.
  *
- * Step 1 (next): fills in the full v1 message spec from
- * planning/phase2-tier1-plan.md §3 — MessageKind enum, ProtocolMessage<K>
- * envelope, payload interfaces for every kind, and the validateMessage()
- * runtime guard used by the relay to validate inbound messages.
+ * Wire format: each message is a single JSON object matching the
+ * `ProtocolMessage` discriminated union. The union is keyed on `kind` so
+ * handlers can narrow the type with a `switch (msg.kind)` statement.
  *
- * The contract must stay backward-compatible within v1. Breaking changes
- * require bumping PROTOCOL_VERSION and ensuring both module and relay handle
- * the version mismatch gracefully (the relay rejects unknown versions; the
- * module shows a "please update" notice in the GM's settings panel).
+ * Runtime validation: the relay calls `validateMessage(input)` on every
+ * inbound WebSocket frame after JSON parsing. Invalid messages throw a
+ * `ProtocolError` with a specific code; the relay catches these and sends
+ * back an `error` message with the same code and the correlation id of the
+ * offending message.
+ *
+ * See planning/phase2-tier1-plan.md §3 for the full protocol specification.
  */
+
+// ============================================================================
+// Protocol version
+// ============================================================================
 
 /**
  * The current protocol version. Both the module and the relay declare this
- * version on connect; mismatches are treated as fatal connection errors.
+ * version on connect via `client.hello` / `relay.welcome`. Version mismatches
+ * are fatal — the relay rejects the connection with a `protocol_mismatch`
+ * error, and the module shows a "please update" notice in its settings panel.
  */
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -26,3 +37,737 @@ export const PROTOCOL_VERSION = 1 as const;
  * Type alias for the protocol version constant.
  */
 export type ProtocolVersion = typeof PROTOCOL_VERSION;
+
+// ============================================================================
+// Error codes
+// ============================================================================
+
+/**
+ * All possible error codes that can appear in a protocol `error` message or
+ * be thrown as a `ProtocolError`. These are the stable public codes the
+ * module and the relay agree on — adding a new code is a protocol addition
+ * that requires updating both sides.
+ */
+export type ErrorCode =
+  /** Authentication token missing, malformed, or not recognized. */
+  | "unauthorized"
+  /** Message has a `v` field that does not equal PROTOCOL_VERSION. */
+  | "protocol_mismatch"
+  /** Message envelope or payload failed structural validation. */
+  | "validation_failed"
+  /** Message `kind` is not a known MessageKind. */
+  | "unknown_kind"
+  /** Client is sending too many messages too quickly. */
+  | "rate_limited"
+  /** The AI backend cannot be reached by the relay. */
+  | "backend_unreachable"
+  /** The AI backend returned an error response. */
+  | "backend_error"
+  /** An unexpected error occurred on the relay; details in the message. */
+  | "internal_error";
+
+/**
+ * Structured protocol error. Thrown by `validateMessage()` and by relay
+ * handlers when they need to report a failure back to the client as a
+ * protocol `error` message. The `correlationId` field points at the message
+ * that caused the error, if any.
+ */
+export class ProtocolError extends Error {
+  public override readonly name = "ProtocolError" as const;
+
+  constructor(
+    public readonly code: ErrorCode,
+    message: string,
+    public readonly correlationId?: string
+  ) {
+    super(message);
+  }
+}
+
+// ============================================================================
+// Message kinds
+// ============================================================================
+
+/**
+ * All possible message kinds in protocol v1. This is the discriminator for
+ * the `ProtocolMessage` union — `switch (msg.kind)` narrows the payload type
+ * automatically.
+ */
+export type MessageKind =
+  | "client.hello"
+  | "relay.welcome"
+  | "client.query"
+  | "backend.chat.create"
+  | "backend.actor.create"
+  | "backend.journal.create"
+  | "ping"
+  | "pong"
+  | "error";
+
+// ============================================================================
+// Envelope
+// ============================================================================
+
+/**
+ * Common envelope for all protocol messages. Every message on the wire has
+ * these fields plus a kind-specific `payload`. The generic parameter `K`
+ * narrows the payload type when used via the `ProtocolMessage` union.
+ */
+interface BaseMessage<K extends MessageKind, P> {
+  /** Protocol version. Always equals `PROTOCOL_VERSION`. */
+  readonly v: ProtocolVersion;
+  /** 16-character alphanumeric message ID, generated by the sender. */
+  readonly id: string;
+  /** Sender's clock at message creation (Unix epoch milliseconds). */
+  readonly ts: number;
+  /** Message type discriminator. */
+  readonly kind: K;
+  /** Kind-specific payload. */
+  readonly payload: P;
+}
+
+// ============================================================================
+// Client capability declaration
+// ============================================================================
+
+/**
+ * Capabilities declared by the Foundry module in its `client.hello` message.
+ * The backend uses these to gate features — a `backend.actor.create` will
+ * only be sent to clients that declare `actorCreate: true`.
+ *
+ * Tier 1 has a fixed set of capabilities. Tier 2+ adds `combatStateRead`,
+ * `tokenMove`, `playlistControl`, etc.
+ */
+export interface ClientCapabilities {
+  /** Module can render injected chat messages via `backend.chat.create`. */
+  readonly chatCreate: boolean;
+  /** Module can create actors via `backend.actor.create`. */
+  readonly actorCreate: boolean;
+  /** Module can create journal entries via `backend.journal.create`. */
+  readonly journalCreate: boolean;
+  /** Foundry system module ID, e.g. "pf2e". */
+  readonly systemId: string;
+  /** Foundry system module version, e.g. "7.12.1". */
+  readonly systemVersion: string;
+  /** Foundry core version, e.g. "13.351". */
+  readonly foundryVersion: string;
+}
+
+// ============================================================================
+// Payload interfaces
+// ============================================================================
+
+/**
+ * Payload for `client.hello`. The module sends this as the first message
+ * after the WebSocket connection opens. The relay verifies the protocol
+ * version and responds with `relay.welcome` on success or an `error`
+ * message on failure.
+ */
+export interface ClientHelloPayload {
+  /** Protocol version the module speaks (should equal `PROTOCOL_VERSION`). */
+  readonly protocolVersion: ProtocolVersion;
+  /** Foundry world ID the module is running in. */
+  readonly worldId: string;
+  /** Foundry user ID of the GM running the module (must be a GM). */
+  readonly gmUserId: string;
+  /**
+   * True if this GM is the designated primary GM for multi-GM worlds. Tier 1
+   * enforces single primary GM — if a second GM connects with `isPrimaryGM:
+   * true`, the relay rejects the second connection.
+   */
+  readonly isPrimaryGM: boolean;
+  /** Module version string, e.g. "0.1.0". */
+  readonly moduleVersion: string;
+  /** Declared client capabilities. See `ClientCapabilities`. */
+  readonly capabilities: ClientCapabilities;
+}
+
+/**
+ * Payload for `relay.welcome`. The relay sends this in response to a valid
+ * `client.hello`. The module uses `backendAvailable` to decide whether to
+ * show a "waiting for backend" indicator in the settings panel.
+ */
+export interface RelayWelcomePayload {
+  /** Protocol version the relay speaks. */
+  readonly protocolVersion: ProtocolVersion;
+  /** Relay software version string, e.g. "0.1.0". */
+  readonly relayVersion: string;
+  /**
+   * Whether the relay can currently reach the StablePiggy AI backend. If
+   * false, the module can still send `client.query` messages but they will
+   * be rejected with a `backend_unreachable` error.
+   */
+  readonly backendAvailable: boolean;
+  /**
+   * Relay's server clock at welcome send time. Used by the module for clock
+   * skew debugging.
+   */
+  readonly serverTime: number;
+}
+
+/**
+ * Optional structured context attached to a `client.query`. Tier 1 passes
+ * empty or minimal context; Tier 2 starts populating the scene and combat
+ * fields for tactical assist features.
+ */
+export interface QueryContext {
+  /** Currently-active scene ID in Foundry, or null if none. */
+  readonly sceneId: string | null;
+  /** IDs of actors currently selected by the GM. */
+  readonly selectedActorIds: readonly string[];
+  /** Whether the combat tracker is open and in an active combat. */
+  readonly inCombat: boolean;
+  /**
+   * Recent chat messages the backend may use as context for NPC dialogue or
+   * mid-session note-taking. Tier 1 passes an empty array; Tier 2 starts
+   * populating it with the last N messages.
+   */
+  readonly recentChat: readonly string[];
+}
+
+/**
+ * Payload for `client.query`. The module sends this when the GM types
+ * `/napoleon <query>` in Foundry chat. The relay forwards it to the AI
+ * backend, which responds with zero or more `backend.*` command messages.
+ */
+export interface ClientQueryPayload {
+  /**
+   * Stable identifier for this GM's Foundry session. Derived from the
+   * `worldId` + `gmUserId` combination at `client.hello` time and reused
+   * across every query in the same connection. The backend uses this to
+   * maintain conversation context across multiple turns.
+   */
+  readonly sessionId: string;
+  /** The raw text the GM typed after `/napoleon`. */
+  readonly query: string;
+  /** Optional structured Foundry state at query time. */
+  readonly context: QueryContext;
+}
+
+/**
+ * The chat message type enumeration, matching Foundry's `CONST.CHAT_MESSAGE_TYPES`.
+ * - `ic`: in-character speech, styled as dialogue
+ * - `ooc`: out-of-character, styled as narration
+ * - `whisper`: visible only to users in `whisperTo`
+ * - `emote`: italicized action description
+ */
+export type ChatMessageType = "ic" | "ooc" | "whisper" | "emote";
+
+/**
+ * Payload for `backend.chat.create`. The backend sends this to inject a
+ * chat message into the Foundry chat log. The module renders it via
+ * `ChatMessage.create()`.
+ */
+export interface BackendChatCreatePayload {
+  /**
+   * The message ID of the client.query that this response answers, if any.
+   * When set, the module uses this to find a placeholder "thinking..."
+   * message (if one was created when the query was sent) and replace it
+   * with the real response.
+   */
+  readonly correlationId: string | null;
+  /** Speaker information rendered as the chat message header. */
+  readonly speaker: {
+    /** Display name, e.g. "Napoleon" or "Sister Pallid Maren". */
+    readonly alias?: string;
+    /** Optional existing actor ID to speak through. */
+    readonly actorId?: string;
+  };
+  /** HTML content of the message body. */
+  readonly content: string;
+  /** Chat message type — determines styling and behavior. */
+  readonly type: ChatMessageType;
+  /**
+   * User IDs to whisper to. Empty array means GM-visible only. Only used
+   * when `type === "whisper"`.
+   */
+  readonly whisperTo: readonly string[];
+  /** Optional italic flavor text shown above the content. */
+  readonly flavor?: string;
+}
+
+/**
+ * Payload for `backend.actor.create`. The backend sends this to drop a
+ * generated NPC into the Actors sidebar. The module validates the `actor`
+ * field against the pf2e-npc-v1 schema before calling `Actor.create()`.
+ */
+export interface BackendActorCreatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /**
+   * The full Foundry Actor document JSON. The module validates this
+   * against `pf2e-npc-v1.schema.json` before creating the actor.
+   */
+  readonly actor: Readonly<Record<string, unknown>>;
+  /** Optional folder ID to place the new actor in. */
+  readonly folderId?: string;
+}
+
+/**
+ * A single page in a `backend.journal.create` message. Tier 1 supports
+ * text pages only; Tier 2 adds image, PDF, and video pages.
+ */
+export interface JournalPageCreate {
+  /** Page title. */
+  readonly name: string;
+  /** Page type. Tier 1: always "text". */
+  readonly type: "text";
+  /** Page content. */
+  readonly text: {
+    /** HTML body. */
+    readonly content: string;
+    /** Foundry page format enum. 1 = HTML. */
+    readonly format: 1;
+  };
+}
+
+/**
+ * Payload for `backend.journal.create`. The backend sends this to drop a
+ * generated journal entry (scene outline, lore document, handout) into the
+ * Journal sidebar.
+ */
+export interface BackendJournalCreatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /** Journal entry title. */
+  readonly name: string;
+  /** One or more pages. Tier 1 supports text pages only. */
+  readonly pages: readonly JournalPageCreate[];
+  /** Optional folder ID to place the new journal entry in. */
+  readonly folderId?: string;
+}
+
+/**
+ * Payload for `ping`. Empty in protocol v1 — the envelope's `id` and `ts`
+ * carry everything needed for round-trip latency measurement.
+ */
+export type PingPayload = Readonly<Record<string, never>>;
+
+/**
+ * Payload for `pong`. Echoes the ID of the ping being answered so the
+ * sender can correlate and measure latency accurately.
+ */
+export interface PongPayload {
+  /** The `id` of the ping this pong answers. */
+  readonly pingId: string;
+}
+
+/**
+ * Payload for `error`. Sent by either side to report a structured error.
+ * The relay uses this to forward validation failures and auth errors back
+ * to the client; the client uses it to report local errors (e.g. a failed
+ * Actor.create call) back to the backend for logging.
+ */
+export interface ErrorPayload {
+  /** The stable error code. */
+  readonly code: ErrorCode;
+  /** Human-readable error message (not user-facing). */
+  readonly message: string;
+  /**
+   * The `id` of the message that caused this error, if any. Allows the
+   * receiver to correlate the error with the original request.
+   */
+  readonly correlationId?: string;
+}
+
+// ============================================================================
+// Discriminated message union
+// ============================================================================
+
+/** `client.hello` — module → relay, sent on connect. */
+export type ClientHelloMessage = BaseMessage<"client.hello", ClientHelloPayload>;
+/** `relay.welcome` — relay → module, response to hello. */
+export type RelayWelcomeMessage = BaseMessage<"relay.welcome", RelayWelcomePayload>;
+/** `client.query` — module → relay → backend, GM typed `/napoleon ...`. */
+export type ClientQueryMessage = BaseMessage<"client.query", ClientQueryPayload>;
+/** `backend.chat.create` — backend → relay → module, inject chat message. */
+export type BackendChatCreateMessage = BaseMessage<"backend.chat.create", BackendChatCreatePayload>;
+/** `backend.actor.create` — backend → relay → module, drop NPC into sidebar. */
+export type BackendActorCreateMessage = BaseMessage<"backend.actor.create", BackendActorCreatePayload>;
+/** `backend.journal.create` — backend → relay → module, drop journal entry. */
+export type BackendJournalCreateMessage = BaseMessage<"backend.journal.create", BackendJournalCreatePayload>;
+/** `ping` — both directions, keep-alive probe. */
+export type PingMessage = BaseMessage<"ping", PingPayload>;
+/** `pong` — both directions, response to ping. */
+export type PongMessage = BaseMessage<"pong", PongPayload>;
+/** `error` — both directions, structured error report. */
+export type ErrorMessage = BaseMessage<"error", ErrorPayload>;
+
+/**
+ * The full protocol message union. Use `switch (msg.kind)` to narrow to a
+ * specific variant with type-safe payload access.
+ */
+export type ProtocolMessage =
+  | ClientHelloMessage
+  | RelayWelcomeMessage
+  | ClientQueryMessage
+  | BackendChatCreateMessage
+  | BackendActorCreateMessage
+  | BackendJournalCreateMessage
+  | PingMessage
+  | PongMessage
+  | ErrorMessage;
+
+/**
+ * Helper type that extracts the payload type for a given message kind. Used
+ * by `makeMessage` to ensure the payload matches the declared kind.
+ */
+export type PayloadFor<K extends MessageKind> = Extract<
+  ProtocolMessage,
+  { kind: K }
+>["payload"];
+
+// ============================================================================
+// Message construction helpers
+// ============================================================================
+
+/**
+ * Generate a 16-character alphanumeric message ID using a cryptographically
+ * strong random source (Web Crypto API, available in Node 18+ and all modern
+ * browsers). The ID space is 62^16 ≈ 4.77e28, collision probability is
+ * negligible for any realistic session length.
+ */
+export function makeMessageId(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  let id = "";
+  for (let i = 0; i < 16; i++) {
+    // Modulo bias is negligible (62 / 256 ≈ 4% per byte, no security impact).
+    id += chars[bytes[i]! % 62];
+  }
+  return id;
+}
+
+/**
+ * Construct a protocol message with a fresh ID and current timestamp. The
+ * generic parameter `K` is narrowed from the `kind` argument, so the
+ * `payload` parameter is checked against the correct payload type at
+ * compile time.
+ *
+ * @example
+ * const msg = makeMessage("ping", {});
+ * const hello = makeMessage("client.hello", {
+ *   protocolVersion: PROTOCOL_VERSION,
+ *   worldId: "my-world",
+ *   gmUserId: "user-123",
+ *   isPrimaryGM: true,
+ *   moduleVersion: "0.1.0",
+ *   capabilities: { ... }
+ * });
+ */
+export function makeMessage<K extends MessageKind>(
+  kind: K,
+  payload: PayloadFor<K>
+): Extract<ProtocolMessage, { kind: K }> {
+  const msg = {
+    v: PROTOCOL_VERSION,
+    id: makeMessageId(),
+    ts: Date.now(),
+    kind,
+    payload,
+  };
+  // Cast is safe because `kind` narrows `PayloadFor<K>`, so the constructed
+  // object satisfies the narrowed union variant by construction.
+  return msg as unknown as Extract<ProtocolMessage, { kind: K }>;
+}
+
+// ============================================================================
+// Runtime validation
+// ============================================================================
+
+/**
+ * Internal assertion helper. Throws a `ProtocolError` with `validation_failed`
+ * if `condition` is false.
+ */
+function assert(
+  condition: unknown,
+  field: string,
+  expected: string,
+  correlationId?: string
+): asserts condition {
+  if (!condition) {
+    throw new ProtocolError(
+      "validation_failed",
+      `${field}: expected ${expected}`,
+      correlationId
+    );
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+/**
+ * Validate the envelope fields shared by all messages. Throws on failure.
+ * Returns the raw message cast to the envelope shape for further validation.
+ */
+function validateEnvelope(input: unknown): {
+  v: ProtocolVersion;
+  id: string;
+  ts: number;
+  kind: MessageKind;
+  payload: Record<string, unknown>;
+} {
+  assert(isPlainObject(input), "message", "an object");
+  const raw = input;
+
+  if (raw.v !== PROTOCOL_VERSION) {
+    throw new ProtocolError(
+      "protocol_mismatch",
+      `expected protocol version ${PROTOCOL_VERSION}, got ${String(raw.v)}`,
+      typeof raw.id === "string" ? raw.id : undefined
+    );
+  }
+
+  assert(isNonEmptyString(raw.id), "id", "a non-empty string");
+  assert(isFiniteNumber(raw.ts), "ts", "a finite number");
+  assert(isNonEmptyString(raw.kind), "kind", "a non-empty string", raw.id);
+  assert(isPlainObject(raw.payload), "payload", "an object", raw.id);
+
+  return {
+    v: PROTOCOL_VERSION,
+    id: raw.id,
+    ts: raw.ts,
+    kind: raw.kind as MessageKind,
+    payload: raw.payload,
+  };
+}
+
+function validateCapabilities(
+  value: unknown,
+  correlationId: string
+): asserts value is ClientCapabilities {
+  assert(isPlainObject(value), "payload.capabilities", "an object", correlationId);
+  const c = value;
+  assert(typeof c.chatCreate === "boolean", "capabilities.chatCreate", "boolean", correlationId);
+  assert(typeof c.actorCreate === "boolean", "capabilities.actorCreate", "boolean", correlationId);
+  assert(typeof c.journalCreate === "boolean", "capabilities.journalCreate", "boolean", correlationId);
+  assert(isNonEmptyString(c.systemId), "capabilities.systemId", "non-empty string", correlationId);
+  assert(isNonEmptyString(c.systemVersion), "capabilities.systemVersion", "non-empty string", correlationId);
+  assert(isNonEmptyString(c.foundryVersion), "capabilities.foundryVersion", "non-empty string", correlationId);
+}
+
+function validateHelloPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(payload.protocolVersion === PROTOCOL_VERSION, "payload.protocolVersion", `equals ${PROTOCOL_VERSION}`, correlationId);
+  assert(isNonEmptyString(payload.worldId), "payload.worldId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.gmUserId), "payload.gmUserId", "non-empty string", correlationId);
+  assert(typeof payload.isPrimaryGM === "boolean", "payload.isPrimaryGM", "boolean", correlationId);
+  assert(isNonEmptyString(payload.moduleVersion), "payload.moduleVersion", "non-empty string", correlationId);
+  validateCapabilities(payload.capabilities, correlationId);
+}
+
+function validateWelcomePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(payload.protocolVersion === PROTOCOL_VERSION, "payload.protocolVersion", `equals ${PROTOCOL_VERSION}`, correlationId);
+  assert(isNonEmptyString(payload.relayVersion), "payload.relayVersion", "non-empty string", correlationId);
+  assert(typeof payload.backendAvailable === "boolean", "payload.backendAvailable", "boolean", correlationId);
+  assert(isFiniteNumber(payload.serverTime), "payload.serverTime", "finite number", correlationId);
+}
+
+function validateQueryContext(
+  value: unknown,
+  correlationId: string
+): asserts value is QueryContext {
+  assert(isPlainObject(value), "payload.context", "an object", correlationId);
+  const ctx = value;
+  assert(
+    ctx.sceneId === null || typeof ctx.sceneId === "string",
+    "context.sceneId",
+    "string or null",
+    correlationId
+  );
+  assert(isStringArray(ctx.selectedActorIds), "context.selectedActorIds", "string array", correlationId);
+  assert(typeof ctx.inCombat === "boolean", "context.inCombat", "boolean", correlationId);
+  assert(isStringArray(ctx.recentChat), "context.recentChat", "string array", correlationId);
+}
+
+function validateQueryPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(isNonEmptyString(payload.sessionId), "payload.sessionId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.query), "payload.query", "non-empty string", correlationId);
+  validateQueryContext(payload.context, correlationId);
+}
+
+function validateChatCreatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isPlainObject(payload.speaker), "payload.speaker", "an object", correlationId);
+  const speaker = payload.speaker;
+  if ("alias" in speaker) {
+    assert(typeof speaker.alias === "string", "speaker.alias", "string when present", correlationId);
+  }
+  if ("actorId" in speaker) {
+    assert(typeof speaker.actorId === "string", "speaker.actorId", "string when present", correlationId);
+  }
+  assert(isNonEmptyString(payload.content), "payload.content", "non-empty string", correlationId);
+  assert(
+    payload.type === "ic" ||
+      payload.type === "ooc" ||
+      payload.type === "whisper" ||
+      payload.type === "emote",
+    "payload.type",
+    "one of ic|ooc|whisper|emote",
+    correlationId
+  );
+  assert(isStringArray(payload.whisperTo), "payload.whisperTo", "string array", correlationId);
+  if ("flavor" in payload) {
+    assert(typeof payload.flavor === "string", "payload.flavor", "string when present", correlationId);
+  }
+}
+
+function validateActorCreatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isPlainObject(payload.actor), "payload.actor", "an object", correlationId);
+  if ("folderId" in payload) {
+    assert(typeof payload.folderId === "string", "payload.folderId", "string when present", correlationId);
+  }
+}
+
+function validateJournalCreatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isNonEmptyString(payload.name), "payload.name", "non-empty string", correlationId);
+  assert(Array.isArray(payload.pages), "payload.pages", "an array", correlationId);
+  assert((payload.pages as unknown[]).length > 0, "payload.pages", "non-empty array", correlationId);
+  for (const [index, page] of (payload.pages as unknown[]).entries()) {
+    assert(isPlainObject(page), `pages[${index}]`, "an object", correlationId);
+    const p = page;
+    assert(isNonEmptyString(p.name), `pages[${index}].name`, "non-empty string", correlationId);
+    assert(p.type === "text", `pages[${index}].type`, `"text"`, correlationId);
+    assert(isPlainObject(p.text), `pages[${index}].text`, "an object", correlationId);
+    const text = p.text;
+    assert(typeof text.content === "string", `pages[${index}].text.content`, "string", correlationId);
+    assert(text.format === 1, `pages[${index}].text.format`, "1 (HTML)", correlationId);
+  }
+  if ("folderId" in payload) {
+    assert(typeof payload.folderId === "string", "payload.folderId", "string when present", correlationId);
+  }
+}
+
+function validatePongPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(isNonEmptyString(payload.pingId), "payload.pingId", "non-empty string", correlationId);
+}
+
+function validateErrorPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(isNonEmptyString(payload.code), "payload.code", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.message), "payload.message", "non-empty string", correlationId);
+  if ("correlationId" in payload) {
+    assert(
+      typeof payload.correlationId === "string",
+      "payload.correlationId",
+      "string when present",
+      correlationId
+    );
+  }
+}
+
+/**
+ * Validate an arbitrary value (usually the result of `JSON.parse()` on a
+ * WebSocket frame) against the protocol v1 message contract. Throws a
+ * `ProtocolError` with a specific code on failure; returns the input
+ * narrowed to `ProtocolMessage` on success.
+ *
+ * The relay calls this on every inbound frame after JSON parsing. Errors
+ * produced by this function are converted by the relay's error handler
+ * into outbound `error` messages sent back to the offending client.
+ *
+ * @throws {ProtocolError} with `code: "validation_failed"` for structural
+ *   errors, `"protocol_mismatch"` for version errors, or `"unknown_kind"`
+ *   for unknown message kinds.
+ */
+export function validateMessage(input: unknown): ProtocolMessage {
+  const envelope = validateEnvelope(input);
+  const { kind, payload, id } = envelope;
+
+  switch (kind) {
+    case "client.hello":
+      validateHelloPayload(payload, id);
+      break;
+    case "relay.welcome":
+      validateWelcomePayload(payload, id);
+      break;
+    case "client.query":
+      validateQueryPayload(payload, id);
+      break;
+    case "backend.chat.create":
+      validateChatCreatePayload(payload, id);
+      break;
+    case "backend.actor.create":
+      validateActorCreatePayload(payload, id);
+      break;
+    case "backend.journal.create":
+      validateJournalCreatePayload(payload, id);
+      break;
+    case "ping":
+      // PingPayload is empty — no further validation needed.
+      break;
+    case "pong":
+      validatePongPayload(payload, id);
+      break;
+    case "error":
+      validateErrorPayload(payload, id);
+      break;
+    default: {
+      // Exhaustiveness check: if a new MessageKind is added to the union
+      // without a case here, TypeScript will fail to compile because `kind`
+      // will not be `never`.
+      const exhaustive: never = kind;
+      throw new ProtocolError(
+        "unknown_kind",
+        `unknown message kind: ${String(exhaustive)}`,
+        id
+      );
+    }
+  }
+
+  return input as ProtocolMessage;
+}

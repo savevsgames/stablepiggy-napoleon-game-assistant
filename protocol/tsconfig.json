@@ -10,6 +10,6 @@
     "moduleResolution": "Bundler",
     "target": "ES2022"
   },
-  "include": ["index.ts", "types.ts"],
+  "include": ["index.ts", "types.ts", "selftest.ts"],
   "exclude": ["node_modules", "dist"]
 }
