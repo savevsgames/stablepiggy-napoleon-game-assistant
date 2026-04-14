@@ -4,23 +4,44 @@
  *
  * ## What this file does
  *
- * Registers a `chatMessage` Foundry hook. When the GM types `/napoleon
- * <query>` in the chat input and hits Enter, this handler:
+ * Overrides `ChatLog.processMessage` on the instance's class prototype
+ * so `/napoleon <query>` is intercepted **before** Foundry's built-in
+ * slash-command parser runs. When the GM types the command and hits
+ * Enter, our override:
  *
- *   1. Intercepts the message before Foundry's default chat dispatch runs
- *   2. Extracts the query text after the `/napoleon ` prefix
- *   3. Immediately creates a "Napoleon is thinking…" placeholder chat
+ *   1. Extracts the query text after the `/napoleon ` prefix
+ *   2. Immediately creates a "Napoleon is thinking…" placeholder chat
  *      message so the GM sees instant feedback (within ~50ms of pressing
  *      Enter, not after the backend responds)
- *   4. Sends a `client.query` to the relay via `RelayClient.sendQuery()`
+ *   3. Sends a `client.query` to the relay via `RelayClient.sendQuery()`
  *      and registers the placeholder under the returned message id so the
  *      inbound `backend.chat.create` can replace it
- *   5. Starts a 15-second timeout that replaces the placeholder with an
+ *   4. Starts a 15-second timeout that replaces the placeholder with an
  *      error message if the backend never responds — keeps the GM from
  *      staring at a silently stuck "thinking…" forever
- *   6. Returns `false` from the hook to suppress Foundry's default
- *      dispatch (so the raw `/napoleon ...` text never echoes in the chat
- *      log)
+ *   5. Returns early so Foundry's default dispatch (including the
+ *      slash-command parser that throws on unknown commands) never runs
+ *
+ * ## Why a prototype override instead of the chatMessage hook
+ *
+ * The original M5 implementation used `Hooks.on("chatMessage", ...)`
+ * and returned `false` from the handler, expecting Foundry to suppress
+ * the default dispatch. In practice, Foundry v13's `ChatLog
+ * .processMessage` runs its slash-command parser and the `chatMessage`
+ * hook as parallel operations rather than a guarded sequence — the
+ * hook fires correctly but the parser ALSO runs and throws
+ * `/napoleon is not a valid chat message command` for every query,
+ * cluttering the F12 console even though the command succeeded. The
+ * prototype override intercepts the message before parse runs at all,
+ * which eliminates the cosmetic error and collapses the dispatch into
+ * a single code path.
+ *
+ * Prototype patching is the only reliable way to add a custom slash
+ * command to Foundry core without pulling in libWrapper or a chat-
+ * commands module. We patch `ui.chat.constructor.prototype` which
+ * resolves to the actual class in use (Foundry's `ChatLog` or a
+ * system override like `ChatLogPF2e`) — whichever is instantiated,
+ * the patch lands on the right prototype.
  *
  * The placeholder-replacement flow is the star of M5: the whole point is
  * that the GM never sees a silent gap between typing the command and
@@ -65,7 +86,6 @@ import type { RelayClient } from "./relay-client.js";
 import { info, warn, error as logError, debug } from "./log.js";
 
 const MODULE_ID = "stablepiggy-napoleon-game-assistant";
-const COMMAND_PREFIX = "/napoleon ";
 
 /** How long (ms) to wait for a backend response before replacing the
  *  placeholder with an error message. 15 seconds is generous enough for
@@ -118,61 +138,94 @@ declare const game: {
   world: { readonly id: string };
 };
 
+/**
+ * Minimal signature of the Foundry ChatLog class we need to patch.
+ * The `any` on `constructor` is deliberate — we're about to replace
+ * a method on its prototype and don't want to fight the type system
+ * over the instance-vs-class distinction. Scoped to this one callsite.
+ */
+interface FoundryChatLogInstance {
+  constructor: {
+    prototype: {
+      processMessage: (
+        this: unknown,
+        message: string,
+        options?: Record<string, unknown>
+      ) => Promise<unknown>;
+    };
+  };
+}
+
 declare const ui: {
+  chat: FoundryChatLogInstance;
   notifications: {
     warn(message: string): void;
     error(message: string): void;
   };
 };
 
-declare const Hooks: {
-  on(
-    event: "chatMessage",
-    callback: (
-      chatLog: unknown,
-      messageText: string,
-      chatData: Record<string, unknown>
-    ) => boolean | void
-  ): void;
-};
-
 // ── Command registration ───────────────────────────────────────────────
 
 /**
- * Register the `/napoleon` chat command hook. Call once from the
- * Foundry `ready` hook in main.ts, after the RelayClient has been
- * constructed. Safe to call multiple times — Foundry deduplicates
- * hook registrations by callback identity, which is stable across
- * imports because this file only declares the function once.
+ * Patch `ChatLog.processMessage` to intercept `/napoleon` queries
+ * before Foundry's slash-command parser sees them. Call once from
+ * the Foundry `ready` hook in main.ts, after the RelayClient has
+ * been constructed and `ui.chat` is available.
+ *
+ * The override keeps a reference to the original method and falls
+ * back to it for every message that isn't one of ours, so stock
+ * Foundry chat (including rolls, whispers, and other slash commands
+ * added by other modules or system packages) still works normally.
  */
 export function registerChatCommand(client: RelayClient): void {
   const sessionId = computeSessionId();
-  info(`chat command registered (sessionId=${sessionId})`);
 
-  Hooks.on("chatMessage", (_chatLog, messageText, _chatData) => {
-    if (typeof messageText !== "string" || !messageText.startsWith(COMMAND_PREFIX)) {
-      return; // not our command, let Foundry handle it normally
+  const proto = ui.chat.constructor.prototype;
+  const original = proto.processMessage;
+  if (typeof original !== "function") {
+    logError(
+      "could not locate ChatLog.prototype.processMessage — /napoleon command will not be available"
+    );
+    return;
+  }
+
+  proto.processMessage = async function (
+    this: unknown,
+    message: string,
+    options?: Record<string, unknown>
+  ): Promise<unknown> {
+    const trimmed = typeof message === "string" ? message.trim() : "";
+
+    // Match both `/napoleon` (bare) and `/napoleon <query>`. The bare
+    // form is handled as "empty query" below so the GM gets a helpful
+    // warning rather than Foundry's generic "not a valid command".
+    const bare = "/napoleon";
+    const isBare = trimmed === bare;
+    const hasQuery = trimmed.startsWith(bare + " ") || trimmed.startsWith(bare + "\t");
+
+    if (!isBare && !hasQuery) {
+      return original.call(this, message, options);
     }
 
-    // GM-only gate. Tier 1 is a GM tool; players typing /napoleon see
-    // no effect. When/if we open this to per-player use in Tier 2 we
-    // replace this check with a capability check against the sender.
+    // GM-only gate. Tier 1 is a GM tool; players typing /napoleon fall
+    // through to Foundry's normal pipeline (which will throw the
+    // "not a valid chat message command" error — accurate for them
+    // since the feature isn't available at the player level yet).
     if (!game.user.isGM) {
-      return; // fall through to normal chat so players see their own text
+      return original.call(this, message, options);
     }
 
-    const query = messageText.slice(COMMAND_PREFIX.length).trim();
+    const query = isBare ? "" : trimmed.slice(bare.length).trim();
     if (query.length === 0) {
       ui.notifications.warn("Napoleon: query text was empty");
-      return false; // suppress the bare /napoleon echo
+      return undefined;
     }
 
-    // Don't await inside the hook callback — Foundry expects an
-    // immediate boolean return. Kick off the async flow and return
-    // false synchronously to suppress the default dispatch.
-    void handleNapoleonQuery(client, sessionId, query);
-    return false;
-  });
+    await handleNapoleonQuery(client, sessionId, query);
+    return undefined;
+  };
+
+  info(`chat command registered (sessionId=${sessionId})`);
 }
 
 // ── Query flow ─────────────────────────────────────────────────────────
