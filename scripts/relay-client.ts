@@ -42,10 +42,14 @@
  * Valid `relay.welcome` completes the handshake. `pong` is tracked for
  * the ping loop. `backend.chat.create` (M4) calls Foundry's
  * `ChatMessage.create()` to render the message in the world chat log.
- * `backend.actor.create` / `backend.journal.create` are still stubs —
- * full handlers land in M7 alongside the pf2e NPC schema validation.
- * `error` messages from the relay are logged at warn level. Anything
- * else is logged as unexpected.
+ * `backend.actor.create` (M7-A) validates the payload structurally,
+ * calls `Actor.create()` to drop the generated NPC into the sidebar,
+ * whispers a @UUID confirmation (replacing the pending "Napoleon is
+ * thinking…" placeholder in place), and auto-opens the new actor's
+ * sheet unless combat is active. `backend.journal.create` is still a
+ * stub — the full handler lands in a later milestone alongside the
+ * journal content templates. `error` messages from the relay are
+ * logged at warn level. Anything else is logged as unexpected.
  *
  * ## Whisper target mapping (M4)
  *
@@ -67,7 +71,8 @@
  *   - Correlation id tracking for in-flight queries (M4/M5 — tracked
  *     via the correlationId field on the payload, but M4 doesn't
  *     dedupe or replace placeholders yet)
- *   - Calling Actor.create / JournalEntry.create on inbound commands (M7)
+ *   - ~~Calling Actor.create on inbound actor.create commands~~ — shipped M7-A
+ *   - Calling JournalEntry.create on inbound journal.create commands (deferred)
  *   - Test Connection button in the settings panel (M7)
  *
  * Typed against Foundry VTT v13.351. The `ChatMessage`, `game.users`,
@@ -85,6 +90,7 @@ import {
   type ClientHelloPayload,
   type ClientQueryPayload,
   type BackendChatCreatePayload,
+  type BackendActorCreatePayload,
 } from "@stablepiggy-napoleon/protocol";
 
 import { info, warn, error as logError, debug } from "./log.js";
@@ -135,6 +141,27 @@ declare const CONST: {
   };
 };
 
+/**
+ * Minimal subset of Foundry's Actor document we touch in the actor.create
+ * handler. `Actor.create()` in Foundry v13 is a static method on the
+ * document class that returns `Promise<Actor | undefined>`; the undefined
+ * path happens when a pre-create hook rejects or the core validator
+ * fails, so we must handle it explicitly before building a @UUID link
+ * against the resulting id.
+ */
+interface FoundryActor {
+  readonly id: string;
+  readonly name?: string;
+  readonly sheet: { render(force: boolean): void };
+}
+
+declare const Actor: {
+  create(
+    data: Record<string, unknown>,
+    options?: { folder?: string }
+  ): Promise<FoundryActor | undefined>;
+};
+
 declare const game: {
   users: {
     get(id: string): { id: string; isGM: boolean } | undefined;
@@ -143,7 +170,37 @@ declare const game: {
     get(id: string): FoundryChatMessage | undefined;
   };
   user: { readonly id: string };
+  /**
+   * Currently-active Combat, or null/undefined if none. We only read
+   * `combat?.active` from the actor.create handler to decide whether
+   * to auto-open the newly-created NPC sheet — GMs mid-fight typically
+   * want the actor in the sidebar for later without a popup stealing
+   * focus.
+   */
+  combat?: { active?: boolean } | null;
 };
+
+/**
+ * Escape a string for safe interpolation into a chat-message HTML body.
+ * Used by the actor error-whisper path where exception messages (from
+ * Actor.create failures or structural-validation rejects) may contain
+ * arbitrary user text. NPC display names in the success path do NOT
+ * flow through this helper because the success whisper uses the bare
+ * `@UUID[Actor.<id>]` form — Foundry's enricher fetches the name from
+ * the document itself, so no user text ever lands in the HTML string.
+ *
+ * Duplicated from `chat-command.ts::escapeHtml` rather than imported
+ * to avoid coupling these two files; the function is seven lines and
+ * has no dependencies.
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 const MODULE_VERSION = "0.0.1";
 
@@ -385,10 +442,12 @@ export class RelayClient {
         void this.handleChatCreate(message.payload);
         break;
       case "backend.actor.create":
+        void this.handleActorCreate(message.payload);
+        break;
       case "backend.journal.create":
-        // M7 stubs — log receipt and drop. Full handlers land in M7
-        // alongside the pf2e NPC schema validation.
-        info(`received ${message.kind} (handler lands in M7)`);
+        // M7 stub — log receipt and drop. Full handler lands in a
+        // later milestone alongside the journal content templates.
+        info(`received ${message.kind} (handler deferred to journal milestone)`);
         break;
       case "error":
         warn(
@@ -604,6 +663,222 @@ export class RelayClient {
       );
     }
     return result;
+  }
+
+  /**
+   * Handle a `backend.actor.create` payload: structurally validate the
+   * actor document, call Foundry's `Actor.create()` to drop it into the
+   * Actors sidebar, whisper a confirmation to the GM with a @UUID link,
+   * and auto-open the new actor's sheet unless combat is active.
+   *
+   * ## Validation
+   *
+   * The backend already validated the full pf2e NPC schema via ajv
+   * before emitting this command. The module-side validation here is
+   * intentionally lightweight — we only check the structural fields
+   * that would make `Actor.create` throw or misbehave downstream
+   * (presence of `name`, `type === "npc"`, `system` object). This is
+   * defense in depth, not a re-implementation of schema validation.
+   *
+   * ## Nullable return handling
+   *
+   * `Actor.create()` in Foundry v13 returns `Promise<Actor | undefined>`.
+   * The undefined path happens when a pre-create hook rejects or the
+   * core document validator fails. We check `created?.id` explicitly
+   * before building the @UUID link — a null id produces a broken link
+   * and silent failure, which is worse than surfacing the problem in
+   * a visible whisper.
+   *
+   * ## Feedback rendering
+   *
+   * On success and on every failure path, we render a whisper-to-self
+   * (or replace the pending "Napoleon is thinking…" placeholder if the
+   * query's correlationId matches one) so the GM always sees the
+   * outcome. See `renderActorFeedback` for the placeholder-replacement
+   * mechanics, which mirror `handleChatCreate`'s inline version.
+   *
+   * ## Auto-open sheet
+   *
+   * Quality-of-life: after a successful create, render the actor's
+   * sheet so the GM can review the generated NPC without having to
+   * find it in the sidebar. Gated on `!game.combat?.active` — a GM
+   * mid-fight typically just wants the NPC in the sidebar for later,
+   * not a popup stealing focus. Fails silently if `sheet.render`
+   * throws; the actor IS created either way, and the sheet is a
+   * convenience not a required step.
+   */
+  private async handleActorCreate(
+    payload: BackendActorCreatePayload
+  ): Promise<void> {
+    // ── Lightweight structural validation ─────────────────────────
+    // Defense in depth on top of the backend's ajv pass. We check only
+    // the fields that would make Actor.create throw or produce a
+    // malformed document; the full schema check already ran server-
+    // side and any failure there would have prevented this command
+    // from being emitted.
+    const actor = payload.actor as Record<string, unknown> | undefined;
+    if (!actor || typeof actor !== "object") {
+      await this.renderActorFeedback(
+        payload.correlationId,
+        "<p>⚠️ Napoleon NPC generation failed: backend sent a null or non-object actor payload.</p>"
+      );
+      return;
+    }
+    const name = actor.name;
+    if (typeof name !== "string" || name.length === 0) {
+      await this.renderActorFeedback(
+        payload.correlationId,
+        "<p>⚠️ Napoleon NPC generation failed: backend actor payload is missing a name.</p>"
+      );
+      return;
+    }
+    if (actor.type !== "npc") {
+      await this.renderActorFeedback(
+        payload.correlationId,
+        `<p>⚠️ Napoleon NPC generation failed: actor type is "${escapeHtml(String(actor.type))}", expected "npc".</p>`
+      );
+      return;
+    }
+    if (!actor.system || typeof actor.system !== "object") {
+      await this.renderActorFeedback(
+        payload.correlationId,
+        "<p>⚠️ Napoleon NPC generation failed: backend actor payload is missing its system block.</p>"
+      );
+      return;
+    }
+
+    // ── Actor.create with nullable return handling ────────────────
+    let created: FoundryActor | undefined;
+    try {
+      const createOptions = payload.folderId
+        ? { folder: payload.folderId }
+        : undefined;
+      created = await Actor.create(
+        actor as Record<string, unknown>,
+        createOptions
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(
+        `Actor.create threw for backend.actor.create: ${msg}`,
+        err
+      );
+      await this.renderActorFeedback(
+        payload.correlationId,
+        `<p>⚠️ Napoleon NPC creation failed: Foundry rejected the actor (${escapeHtml(msg)}).</p>`
+      );
+      return;
+    }
+
+    if (!created || !created.id) {
+      warn(
+        `Actor.create returned no document for backend.actor.create (name=${name}, correlationId=${payload.correlationId ?? "none"}) — a pre-create hook or internal validator likely rejected it`
+      );
+      await this.renderActorFeedback(
+        payload.correlationId,
+        "<p>⚠️ Napoleon NPC creation returned no document — a Foundry pre-create hook or internal validator likely rejected it. Check the Foundry console for details.</p>"
+      );
+      return;
+    }
+
+    // ── Success feedback ──────────────────────────────────────────
+    // Use the bare @UUID[Actor.<id>] form (no display override). Foundry's
+    // enricher fetches the display name from the document itself at
+    // render time, so no user-input text is spliced into the HTML body.
+    const confirmContent = `<p>✓ Created @UUID[Actor.${created.id}]</p>`;
+    await this.renderActorFeedback(payload.correlationId, confirmContent, {
+      actorId: created.id,
+    });
+
+    info(
+      `handleActorCreate: created NPC "${name}" id=${created.id} (correlationId=${payload.correlationId ?? "none"})`
+    );
+
+    // ── Quality-of-life: auto-open the sheet unless combat is active ──
+    if (!game.combat?.active) {
+      try {
+        created.sheet.render(true);
+      } catch (err) {
+        debug(
+          `sheet.render failed for actor ${created.id} — silent fail-through: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    } else {
+      debug(
+        `combat active — skipping auto-open of actor sheet for ${created.id}`
+      );
+    }
+  }
+
+  /**
+   * Render feedback text for an actor.create command. If the supplied
+   * correlationId matches a pending "Napoleon is thinking…" placeholder
+   * (tracked in `pendingPlaceholders` by chat-command.ts when the GM
+   * fires a query), replace that placeholder via `ChatMessage.update()`.
+   * Otherwise create a new whisper-to-self.
+   *
+   * Used by both the success path (confirmation whisper with @UUID link)
+   * and every error path (structural validation failures, Actor.create
+   * failures, nullable-return failures) in `handleActorCreate`.
+   *
+   * Intentionally local to the actor handler rather than shared with
+   * `handleChatCreate`'s inline placeholder-replacement — refactoring
+   * the chat handler to use this helper would be scope creep for
+   * Phase 4. If a third command kind needs the same pattern in the
+   * future, lift both into a shared helper at that time.
+   */
+  private async renderActorFeedback(
+    correlationId: string | null,
+    content: string,
+    extraFlags?: Record<string, unknown>
+  ): Promise<void> {
+    // Placeholder replacement path — mirrors handleChatCreate.
+    if (correlationId && this.pendingPlaceholders.has(correlationId)) {
+      const placeholderId = this.pendingPlaceholders.get(correlationId)!;
+      this.pendingPlaceholders.delete(correlationId);
+      const placeholder = game.messages.get(placeholderId);
+      if (placeholder) {
+        try {
+          await placeholder.update({ content });
+          debug(
+            `renderActorFeedback: replaced placeholder ${placeholderId} (correlationId=${correlationId})`
+          );
+          return;
+        } catch (err) {
+          logError(
+            `placeholder update failed for actor feedback, falling back to new whisper: ${err instanceof Error ? err.message : String(err)}`,
+            err
+          );
+          // fall through to ChatMessage.create below — the GM still
+          // gets feedback even if the in-place update blew up
+        }
+      } else {
+        debug(
+          `placeholder ${placeholderId} no longer exists (deleted?) — creating new whisper`
+        );
+      }
+    }
+
+    // New whisper path — either no correlation id, or the placeholder
+    // was never registered, or the update path failed through.
+    try {
+      await ChatMessage.create({
+        content,
+        style: CONST.CHAT_MESSAGE_STYLES.OTHER,
+        whisper: [this.ctx.gmUserId],
+        flags: {
+          "stablepiggy-napoleon-game-assistant": {
+            ...(correlationId ? { correlationId } : {}),
+            ...(extraFlags ?? {}),
+          },
+        },
+      });
+    } catch (err) {
+      logError(
+        `ChatMessage.create failed for actor feedback whisper: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    }
   }
 
   // ── Timers ──────────────────────────────────────────────────────────
