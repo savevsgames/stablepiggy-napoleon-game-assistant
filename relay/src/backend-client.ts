@@ -110,12 +110,22 @@ export async function forwardQueryToBackend(
   // Real HTTP call to the backend's POST /api/my/foundry/query endpoint.
   // Request shape is defined in BACKEND-API-SPEC.md §2.2. The backend token
   // is shipped as Authorization: Bearer per BACKEND-API-SPEC.md §3.
+  //
+  // systemId is lifted from the authenticated hello's capabilities block
+  // (stored on connection state in server.ts::handleHello) and forwarded
+  // so the backend's foundry-mode loader can compose the correct system
+  // profile (foundry/{systemId}.md) on top of foundry-base.md. Prior to
+  // this wiring, the backend fell back to SYSTEM_ID_DEFAULT='pf2e' with
+  // a warning log on every first query — the fallback path is still in
+  // place as a safety net but production traffic now always carries an
+  // explicit systemId and no longer trips the warning.
   const body = {
     sessionId: query.sessionId,
     identityId: connection.identityId,
     worldId: connection.worldId,
     query: query.query,
     context: query.context,
+    systemId: connection.capabilities?.systemId,
   };
 
   const startedAt = Date.now();
