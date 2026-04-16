@@ -1,0 +1,13 @@
+# Build-context hygiene for docker build -f relay/Dockerfile .
+# Lives at the repo root because that is the build context root for
+# the multi-stage relay build. Stage 1 runs a fresh `npm install`, so
+# workstation node_modules/dist add upload time with no build value.
+# relay/.env holds the real RELAY_BACKEND_TOKEN — excluding it here
+# prevents shipping that secret into the Docker daemon's build cache
+# even though the multi-stage runtime image never bakes it in.
+
+node_modules
+dist
+.env
+.env.local
+.git
