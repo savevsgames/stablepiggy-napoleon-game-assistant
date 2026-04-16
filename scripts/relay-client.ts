@@ -46,9 +46,9 @@
  * calls `Actor.create()` to drop the generated NPC into the sidebar,
  * whispers a @UUID confirmation (replacing the pending "Napoleon is
  * thinking…" placeholder in place), and auto-opens the new actor's
- * sheet unless combat is active. `backend.journal.create` is still a
- * stub — the full handler lands in a later milestone alongside the
- * journal content templates. `error` messages from the relay are
+ * sheet unless combat is active. `backend.journal.create` validates
+ * the payload, calls `JournalEntry.create()`, whispers a @UUID
+ * confirmation, and auto-opens the journal sheet. `error` messages from the relay are
  * logged at warn level. Anything else is logged as unexpected.
  *
  * ## Whisper target mapping (M4)
@@ -72,7 +72,7 @@
  *     via the correlationId field on the payload, but M4 doesn't
  *     dedupe or replace placeholders yet)
  *   - ~~Calling Actor.create on inbound actor.create commands~~ — shipped M7-A
- *   - Calling JournalEntry.create on inbound journal.create commands (deferred)
+ *   - ~~Calling JournalEntry.create on inbound journal.create commands~~ — shipped Phase 2
  *   - Test Connection button in the settings panel (M7)
  *
  * Typed against Foundry VTT v13.351. The `ChatMessage`, `game.users`,
@@ -92,6 +92,7 @@ import {
   type SessionEventPayload,
   type BackendChatCreatePayload,
   type BackendActorCreatePayload,
+  type BackendJournalCreatePayload,
 } from "@stablepiggy-napoleon/protocol";
 
 import { info, warn, error as logError, debug } from "./log.js";
@@ -161,6 +162,19 @@ declare const Actor: {
     data: Record<string, unknown>,
     options?: { folder?: string }
   ): Promise<FoundryActor | undefined>;
+};
+
+interface FoundryJournalEntry {
+  readonly id: string;
+  readonly name?: string;
+  readonly sheet: { render(force: boolean): void };
+}
+
+declare const JournalEntry: {
+  create(
+    data: Record<string, unknown>,
+    options?: { folder?: string }
+  ): Promise<FoundryJournalEntry | undefined>;
 };
 
 declare const game: {
@@ -461,9 +475,7 @@ export class RelayClient {
         void this.handleActorCreate(message.payload);
         break;
       case "backend.journal.create":
-        // M7 stub — log receipt and drop. Full handler lands in a
-        // later milestone alongside the journal content templates.
-        info(`received ${message.kind} (handler deferred to journal milestone)`);
+        void this.handleJournalCreate(message.payload);
         break;
       case "error":
         warn(
@@ -893,6 +905,123 @@ export class RelayClient {
     } catch (err) {
       logError(
         `ChatMessage.create failed for actor feedback whisper: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    }
+  }
+
+  private async handleJournalCreate(
+    payload: BackendJournalCreatePayload
+  ): Promise<void> {
+    const name = payload.name;
+    if (typeof name !== "string" || name.length === 0) {
+      await this.renderJournalFeedback(
+        payload.correlationId,
+        "<p>⚠️ Napoleon journal creation failed: backend sent a payload with no name.</p>"
+      );
+      return;
+    }
+
+    if (!Array.isArray(payload.pages) || payload.pages.length === 0) {
+      await this.renderJournalFeedback(
+        payload.correlationId,
+        "<p>⚠️ Napoleon journal creation failed: backend sent a payload with no pages.</p>"
+      );
+      return;
+    }
+
+    let created: FoundryJournalEntry | undefined;
+    try {
+      const createData: Record<string, unknown> = {
+        name,
+        pages: payload.pages.map((p) => ({
+          name: p.name,
+          type: p.type,
+          text: { content: p.text.content, format: p.text.format },
+        })),
+      };
+      const createOptions = payload.folderId
+        ? { folder: payload.folderId }
+        : undefined;
+      created = await JournalEntry.create(createData, createOptions);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(
+        `JournalEntry.create threw for backend.journal.create: ${msg}`,
+        err
+      );
+      await this.renderJournalFeedback(
+        payload.correlationId,
+        `<p>⚠️ Napoleon journal creation failed: Foundry rejected the entry (${escapeHtml(msg)}).</p>`
+      );
+      return;
+    }
+
+    if (!created || !created.id) {
+      warn(
+        `JournalEntry.create returned no document for backend.journal.create (name=${name}, correlationId=${payload.correlationId ?? "none"})`
+      );
+      await this.renderJournalFeedback(
+        payload.correlationId,
+        "<p>⚠️ Napoleon journal creation returned no document — a Foundry pre-create hook or internal validator likely rejected it.</p>"
+      );
+      return;
+    }
+
+    const confirmContent = `<p>✓ Created @UUID[JournalEntry.${created.id}]</p>`;
+    await this.renderJournalFeedback(payload.correlationId, confirmContent);
+
+    info(
+      `handleJournalCreate: created journal "${name}" id=${created.id} (correlationId=${payload.correlationId ?? "none"})`
+    );
+
+    try {
+      created.sheet.render(true);
+    } catch (err) {
+      debug(
+        `sheet.render failed for journal ${created.id}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private async renderJournalFeedback(
+    correlationId: string | null,
+    content: string
+  ): Promise<void> {
+    if (correlationId && this.pendingPlaceholders.has(correlationId)) {
+      const placeholderId = this.pendingPlaceholders.get(correlationId)!;
+      this.pendingPlaceholders.delete(correlationId);
+      const placeholder = game.messages.get(placeholderId);
+      if (placeholder) {
+        try {
+          await placeholder.update({ content });
+          debug(
+            `renderJournalFeedback: replaced placeholder ${placeholderId} (correlationId=${correlationId})`
+          );
+          return;
+        } catch (err) {
+          logError(
+            `placeholder update failed for journal feedback: ${err instanceof Error ? err.message : String(err)}`,
+            err
+          );
+        }
+      }
+    }
+
+    try {
+      await ChatMessage.create({
+        content,
+        style: CONST.CHAT_MESSAGE_STYLES.OTHER,
+        whisper: [this.ctx.gmUserId],
+        flags: {
+          "stablepiggy-napoleon-game-assistant": {
+            ...(correlationId ? { correlationId } : {}),
+          },
+        },
+      });
+    } catch (err) {
+      logError(
+        `ChatMessage.create failed for journal feedback whisper: ${err instanceof Error ? err.message : String(err)}`,
         err
       );
     }
