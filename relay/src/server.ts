@@ -43,6 +43,7 @@ import {
   type ProtocolMessage,
   type ClientHelloMessage,
   type ClientQueryMessage,
+  type ClientSessionEventMessage,
   type PingMessage,
   type ErrorCode,
 } from "@stablepiggy-napoleon/protocol";
@@ -60,6 +61,11 @@ import {
   forwardQueryToBackend,
   resolveIdentityFromApiKey,
 } from "./backend-client.js";
+import {
+  pushEvent,
+  flushOnDisconnect,
+  cleanupBuffer,
+} from "./session-buffer.js";
 
 const RELAY_VERSION = "0.0.1";
 
@@ -126,6 +132,8 @@ export function startServer(config: Config, log: Logger): ServerHandle {
     });
 
     socket.on("close", (code, reason) => {
+      flushOnDisconnect(state.id, config, connLog);
+      cleanupBuffer(state.id);
       unregisterConnection(state.id);
       connLog.info(
         {
@@ -230,6 +238,9 @@ async function handleMessage(
         break;
       case "client.query":
         await handleQuery(state, message, config, log);
+        break;
+      case "client.session_event":
+        handleSessionEvent(state, message, config, log);
         break;
       case "pong":
         // Clients sending pongs is rare in M2 (relay doesn't initiate pings
@@ -456,6 +467,29 @@ async function handleQuery(
       message.id
     );
   }
+}
+
+function handleSessionEvent(
+  state: ConnectionState,
+  message: ClientSessionEventMessage,
+  config: Config,
+  log: Logger
+): void {
+  if (!state.helloCompleted || !state.identityId || !state.worldId) {
+    sendError(
+      state,
+      "validation_failed",
+      "client.hello required before client.session_event",
+      message.id
+    );
+    return;
+  }
+
+  pushEvent(state.id, state.identityId, state.worldId, message.payload, config, log);
+  log.debug(
+    { eventType: message.payload.eventType, speaker: message.payload.speaker },
+    "session event buffered"
+  );
 }
 
 // ── Send helpers ──

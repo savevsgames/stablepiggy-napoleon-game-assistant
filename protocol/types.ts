@@ -97,6 +97,7 @@ export type MessageKind =
   | "client.hello"
   | "relay.welcome"
   | "client.query"
+  | "client.session_event"
   | "backend.chat.create"
   | "backend.actor.create"
   | "backend.journal.create"
@@ -370,6 +371,40 @@ export interface BackendJournalCreatePayload {
 }
 
 /**
+ * The type of notable session event captured by the module's auto-capture
+ * hook. The relay buffers these and flushes them to the backend in batches
+ * for Trough persistence.
+ */
+export type SessionEventType =
+  | "roll"
+  | "napoleon_exchange"
+  | "combat"
+  | "gm_whisper";
+
+/**
+ * Payload for `client.session_event`. The module sends this when a notable
+ * event occurs during the Foundry session (GM dice rolls, Napoleon
+ * exchanges, combat events, GM whispers). The relay buffers these and
+ * periodically flushes them to the backend for Trough persistence.
+ */
+export interface SessionEventPayload {
+  /** What kind of notable event this is. */
+  readonly eventType: SessionEventType;
+  /** Unix epoch ms from the Foundry chat message timestamp. */
+  readonly timestamp: number;
+  /** Display name of the speaker. */
+  readonly speaker: string;
+  /** Plain text summary (HTML stripped, max ~500 chars). */
+  readonly content: string;
+  /** Foundry world state at event time. */
+  readonly metadata: {
+    readonly worldId: string;
+    readonly sceneId?: string;
+    readonly combatRound?: number;
+  };
+}
+
+/**
  * Payload for `ping`. Empty in protocol v1 — the envelope's `id` and `ts`
  * carry everything needed for round-trip latency measurement.
  */
@@ -412,6 +447,8 @@ export type ClientHelloMessage = BaseMessage<"client.hello", ClientHelloPayload>
 export type RelayWelcomeMessage = BaseMessage<"relay.welcome", RelayWelcomePayload>;
 /** `client.query` — module → relay → backend, GM typed `/napoleon ...`. */
 export type ClientQueryMessage = BaseMessage<"client.query", ClientQueryPayload>;
+/** `client.session_event` — module → relay, auto-captured notable session event. */
+export type ClientSessionEventMessage = BaseMessage<"client.session_event", SessionEventPayload>;
 /** `backend.chat.create` — backend → relay → module, inject chat message. */
 export type BackendChatCreateMessage = BaseMessage<"backend.chat.create", BackendChatCreatePayload>;
 /** `backend.actor.create` — backend → relay → module, drop NPC into sidebar. */
@@ -433,6 +470,7 @@ export type ProtocolMessage =
   | ClientHelloMessage
   | RelayWelcomeMessage
   | ClientQueryMessage
+  | ClientSessionEventMessage
   | BackendChatCreateMessage
   | BackendActorCreateMessage
   | BackendJournalCreateMessage
@@ -721,6 +759,37 @@ function validateJournalCreatePayload(
   }
 }
 
+const VALID_SESSION_EVENT_TYPES = new Set<string>([
+  "roll",
+  "napoleon_exchange",
+  "combat",
+  "gm_whisper",
+]);
+
+function validateSessionEventPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    typeof payload.eventType === "string" && VALID_SESSION_EVENT_TYPES.has(payload.eventType),
+    "payload.eventType",
+    "one of roll|napoleon_exchange|combat|gm_whisper",
+    correlationId
+  );
+  assert(isFiniteNumber(payload.timestamp), "payload.timestamp", "finite number", correlationId);
+  assert(isNonEmptyString(payload.speaker), "payload.speaker", "non-empty string", correlationId);
+  assert(typeof payload.content === "string", "payload.content", "string", correlationId);
+  assert(isPlainObject(payload.metadata), "payload.metadata", "an object", correlationId);
+  const meta = payload.metadata;
+  assert(isNonEmptyString(meta.worldId), "metadata.worldId", "non-empty string", correlationId);
+  if ("sceneId" in meta) {
+    assert(typeof meta.sceneId === "string", "metadata.sceneId", "string when present", correlationId);
+  }
+  if ("combatRound" in meta) {
+    assert(isFiniteNumber(meta.combatRound), "metadata.combatRound", "finite number when present", correlationId);
+  }
+}
+
 function validatePongPayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -771,6 +840,9 @@ export function validateMessage(input: unknown): ProtocolMessage {
       break;
     case "client.query":
       validateQueryPayload(payload, id);
+      break;
+    case "client.session_event":
+      validateSessionEventPayload(payload, id);
       break;
     case "backend.chat.create":
       validateChatCreatePayload(payload, id);

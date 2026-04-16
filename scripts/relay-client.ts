@@ -89,6 +89,7 @@ import {
   type ProtocolMessage,
   type ClientHelloPayload,
   type ClientQueryPayload,
+  type SessionEventPayload,
   type BackendChatCreatePayload,
   type BackendActorCreatePayload,
 } from "@stablepiggy-napoleon/protocol";
@@ -361,6 +362,21 @@ export class RelayClient {
   }
 
   /**
+   * Send a `client.session_event` to the relay. Fire-and-forget — session
+   * events are buffered relay-side and flushed in batches. Returns the
+   * message id on success, null if not connected.
+   */
+  sendSessionEvent(payload: SessionEventPayload): string | null {
+    if (this.status !== "connected" || !this.socket) {
+      return null;
+    }
+    const msg = makeMessage("client.session_event", payload);
+    this.socket.send(JSON.stringify(msg));
+    debug(`→ client.session_event (type=${payload.eventType}, speaker=${payload.speaker})`);
+    return msg.id;
+  }
+
+  /**
    * Register a Foundry chat message id as the placeholder for a
    * pending query. When the matching `backend.chat.create` arrives
    * (keyed by `correlationId === queryId`), `handleChatCreate` will
@@ -464,6 +480,7 @@ export class RelayClient {
         break;
       case "client.hello":
       case "client.query":
+      case "client.session_event":
         warn(
           `received ${message.kind} from relay — this kind is client→relay only`
         );
