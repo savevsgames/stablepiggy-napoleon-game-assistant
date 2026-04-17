@@ -22,6 +22,17 @@ import type { Logger } from "./log.js";
 const FLUSH_THRESHOLD = 10;
 const IDLE_FLUSH_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_CONTENT_LENGTH = 500;
+const MIN_CONTENT_LENGTH = 10;
+
+// Placeholder messages from the Foundry module's typing indicator.
+// Filtered here so they never enter the buffer or reach the backend.
+// The backend has a matching server-side filter as defense in depth.
+const PLACEHOLDER_PATTERNS = [
+  /^napoleon is thinking/i,
+  /^\.{3}$/,
+  /^…$/,
+  /^typing\.{0,3}$/i,
+];
 
 interface BufferEntry {
   events: SessionEventPayload[];
@@ -40,6 +51,11 @@ export function pushEvent(
   config: Config,
   log: Logger
 ): void {
+  const trimmed = event.content.trim();
+  if (trimmed.length < MIN_CONTENT_LENGTH || PLACEHOLDER_PATTERNS.some(p => p.test(trimmed))) {
+    return;
+  }
+
   let entry = buffers.get(connectionId);
   if (!entry) {
     entry = { events: [], idleTimer: null, identityId, worldId };
