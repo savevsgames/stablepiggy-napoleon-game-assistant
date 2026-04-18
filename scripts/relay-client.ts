@@ -92,7 +92,9 @@ import {
   type SessionEventPayload,
   type BackendChatCreatePayload,
   type BackendActorCreatePayload,
+  type BackendActorUpdatePayload,
   type BackendJournalCreatePayload,
+  type BackendRollTableCreatePayload,
 } from "@stablepiggy-napoleon/protocol";
 
 import { info, warn, error as logError, debug } from "./log.js";
@@ -155,6 +157,7 @@ interface FoundryActor {
   readonly id: string;
   readonly name?: string;
   readonly sheet: { render(force: boolean): void };
+  update(data: Record<string, unknown>): Promise<unknown>;
 }
 
 declare const Actor: {
@@ -177,12 +180,22 @@ declare const JournalEntry: {
   ): Promise<FoundryJournalEntry | undefined>;
 };
 
+declare const RollTable: {
+  create(
+    data: Record<string, unknown>,
+    options?: Record<string, unknown>
+  ): Promise<{ id: string; name?: string } | undefined>;
+};
+
 declare const game: {
   users: {
     get(id: string): { id: string; isGM: boolean } | undefined;
   };
   messages: {
     get(id: string): FoundryChatMessage | undefined;
+  };
+  actors: {
+    getName(name: string): FoundryActor | undefined;
   };
   user: { readonly id: string };
   /**
@@ -437,7 +450,9 @@ export class RelayClient {
       capabilities: {
         chatCreate: true,
         actorCreate: true,
+        actorUpdate: true,
         journalCreate: true,
+        rolltableCreate: true,
         systemId: this.ctx.systemId,
         systemVersion: this.ctx.systemVersion,
         foundryVersion: this.ctx.foundryVersion,
@@ -474,8 +489,14 @@ export class RelayClient {
       case "backend.actor.create":
         void this.handleActorCreate(message.payload);
         break;
+      case "backend.actor.update":
+        void this.handleActorUpdate(message.payload);
+        break;
       case "backend.journal.create":
         void this.handleJournalCreate(message.payload);
+        break;
+      case "backend.rolltable.create":
+        void this.handleRollTableCreate(message.payload);
         break;
       case "error":
         warn(
@@ -840,6 +861,52 @@ export class RelayClient {
   }
 
   /**
+   * Handle a `backend.actor.update` payload: look up the actor by name
+   * and apply partial updates. Primary use case: assigning a generated
+   * portrait image to an NPC's img and prototypeToken.texture.src fields.
+   */
+  private async handleActorUpdate(
+    payload: BackendActorUpdatePayload
+  ): Promise<void> {
+    const { actorName, updates } = payload;
+
+    const actor = game.actors.getName(actorName);
+    if (!actor) {
+      warn(`handleActorUpdate: no actor found with name "${actorName}"`);
+      await this.renderActorFeedback(
+        payload.correlationId,
+        `<p>⚠️ Could not update actor "${escapeHtml(actorName)}" — not found in the Actors sidebar.</p>`
+      );
+      return;
+    }
+
+    try {
+      await actor.update(updates as Record<string, unknown>);
+      info(`handleActorUpdate: updated actor "${actorName}" (id=${actor.id}, fields: ${Object.keys(updates).join(", ")})`);
+
+      await this.renderActorFeedback(
+        payload.correlationId,
+        `<p>✓ Updated @UUID[Actor.${actor.id}] — ${Object.keys(updates).join(", ")}</p>`,
+        { actorId: actor.id }
+      );
+
+      // Re-render the sheet if it's open so the GM sees the portrait immediately
+      try {
+        actor.sheet.render(false);
+      } catch {
+        // silent — sheet may not be open
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(`Actor.update threw for "${actorName}": ${msg}`, err);
+      await this.renderActorFeedback(
+        payload.correlationId,
+        `<p>⚠️ Failed to update actor "${escapeHtml(actorName)}": ${escapeHtml(msg)}</p>`
+      );
+    }
+  }
+
+  /**
    * Render feedback text for an actor.create command. If the supplied
    * correlationId matches a pending "Napoleon is thinking…" placeholder
    * (tracked in `pendingPlaceholders` by chat-command.ts when the GM
@@ -1024,6 +1091,52 @@ export class RelayClient {
         `ChatMessage.create failed for journal feedback whisper: ${err instanceof Error ? err.message : String(err)}`,
         err
       );
+    }
+  }
+
+  /**
+   * Handle a `backend.rolltable.create` payload: create a RollTable
+   * document in Foundry's sidebar.
+   */
+  private async handleRollTableCreate(
+    payload: BackendRollTableCreatePayload
+  ): Promise<void> {
+    const { name, formula, results } = payload;
+
+    if (!name || !formula || !results || results.length === 0) {
+      warn("handleRollTableCreate: invalid payload — missing name, formula, or results");
+      return;
+    }
+
+    try {
+      const tableData: Record<string, unknown> = {
+        name,
+        formula,
+        results: results.map((r) => ({
+          text: r.text,
+          range: r.range,
+          weight: r.weight ?? 1,
+          type: 0, // RESULT_TYPES.TEXT
+          drawn: false,
+        })),
+      };
+
+      const created = await RollTable.create(tableData);
+      if (created?.id) {
+        info(`handleRollTableCreate: created "${name}" (id=${created.id})`);
+        try {
+          await ChatMessage.create({
+            content: `<p>✓ Created RollTable: <strong>${escapeHtml(name)}</strong> (${formula}, ${results.length} entries)</p>`,
+            style: CONST.CHAT_MESSAGE_STYLES.OTHER,
+            whisper: [this.ctx.gmUserId],
+          });
+        } catch { /* non-blocking */ }
+      } else {
+        warn(`RollTable.create returned no document for "${name}"`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(`RollTable.create threw for "${name}": ${msg}`, err);
     }
   }
 
