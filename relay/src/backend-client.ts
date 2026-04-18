@@ -32,10 +32,25 @@ import type { Logger } from "./log.js";
 
 const RELAY_VERSION = "0.0.1";
 
+export interface BackendActorUpdatePayload {
+  readonly correlationId: string | null;
+  readonly actorName: string;
+  readonly updates: Readonly<Record<string, unknown>>;
+}
+
+export interface BackendRollTableCreatePayload {
+  readonly correlationId: string | null;
+  readonly name: string;
+  readonly formula: string;
+  readonly results: ReadonlyArray<{ text: string; range: [number, number]; weight?: number }>;
+}
+
 export type BackendCommand =
   | { kind: "backend.chat.create"; payload: BackendChatCreatePayload }
   | { kind: "backend.actor.create"; payload: BackendActorCreatePayload }
-  | { kind: "backend.journal.create"; payload: BackendJournalCreatePayload };
+  | { kind: "backend.actor.update"; payload: BackendActorUpdatePayload }
+  | { kind: "backend.journal.create"; payload: BackendJournalCreatePayload }
+  | { kind: "backend.rolltable.create"; payload: BackendRollTableCreatePayload };
 
 export interface BackendResponse {
   commands: BackendCommand[];

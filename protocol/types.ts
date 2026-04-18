@@ -100,7 +100,9 @@ export type MessageKind =
   | "client.session_event"
   | "backend.chat.create"
   | "backend.actor.create"
+  | "backend.actor.update"
   | "backend.journal.create"
+  | "backend.rolltable.create"
   | "ping"
   | "pong"
   | "error";
@@ -144,8 +146,12 @@ export interface ClientCapabilities {
   readonly chatCreate: boolean;
   /** Module can create actors via `backend.actor.create`. */
   readonly actorCreate: boolean;
+  /** Module can update actors via `backend.actor.update`. */
+  readonly actorUpdate?: boolean;
   /** Module can create journal entries via `backend.journal.create`. */
   readonly journalCreate: boolean;
+  /** Module can create roll tables via `backend.rolltable.create`. */
+  readonly rolltableCreate?: boolean;
   /** Foundry system module ID, e.g. "pf2e". */
   readonly systemId: string;
   /** Foundry system module version, e.g. "7.12.1". */
@@ -337,6 +343,39 @@ export interface BackendActorCreatePayload {
 }
 
 /**
+ * Payload for `backend.actor.update`. The backend sends this to update
+ * an existing Actor's fields — most commonly to assign a portrait image
+ * or token art after image generation.
+ */
+export interface BackendActorUpdatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /** Exact name of the actor to update (case-sensitive). */
+  readonly actorName: string;
+  /** Partial Actor document — only the fields to change. */
+  readonly updates: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Payload for `backend.rolltable.create`. The backend sends this to
+ * create a RollTable document in the Foundry sidebar.
+ */
+export interface BackendRollTableCreatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /** RollTable name. */
+  readonly name: string;
+  /** Dice formula, e.g. "1d20". */
+  readonly formula: string;
+  /** Table results with text, range, and optional weight. */
+  readonly results: ReadonlyArray<{
+    readonly text: string;
+    readonly range: readonly [number, number];
+    readonly weight?: number;
+  }>;
+}
+
+/**
  * A single page in a `backend.journal.create` message. Tier 1 supports
  * text pages only; Tier 2 adds image, PDF, and video pages.
  */
@@ -453,8 +492,12 @@ export type ClientSessionEventMessage = BaseMessage<"client.session_event", Sess
 export type BackendChatCreateMessage = BaseMessage<"backend.chat.create", BackendChatCreatePayload>;
 /** `backend.actor.create` — backend → relay → module, drop NPC into sidebar. */
 export type BackendActorCreateMessage = BaseMessage<"backend.actor.create", BackendActorCreatePayload>;
+/** `backend.actor.update` — backend → relay → module, update existing actor fields. */
+export type BackendActorUpdateMessage = BaseMessage<"backend.actor.update", BackendActorUpdatePayload>;
 /** `backend.journal.create` — backend → relay → module, drop journal entry. */
 export type BackendJournalCreateMessage = BaseMessage<"backend.journal.create", BackendJournalCreatePayload>;
+/** `backend.rolltable.create` — backend → relay → module, create roll table. */
+export type BackendRollTableCreateMessage = BaseMessage<"backend.rolltable.create", BackendRollTableCreatePayload>;
 /** `ping` — both directions, keep-alive probe. */
 export type PingMessage = BaseMessage<"ping", PingPayload>;
 /** `pong` — both directions, response to ping. */
@@ -473,7 +516,9 @@ export type ProtocolMessage =
   | ClientSessionEventMessage
   | BackendChatCreateMessage
   | BackendActorCreateMessage
+  | BackendActorUpdateMessage
   | BackendJournalCreateMessage
+  | BackendRollTableCreateMessage
   | PingMessage
   | PongMessage
   | ErrorMessage;
@@ -731,6 +776,36 @@ function validateActorCreatePayload(
   }
 }
 
+function validateActorUpdatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isNonEmptyString(payload.actorName), "payload.actorName", "non-empty string", correlationId);
+  assert(isPlainObject(payload.updates), "payload.updates", "an object", correlationId);
+}
+
+function validateRollTableCreatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isNonEmptyString(payload.name), "payload.name", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.formula), "payload.formula", "non-empty string", correlationId);
+  assert(Array.isArray(payload.results), "payload.results", "an array", correlationId);
+  assert((payload.results as unknown[]).length > 0, "payload.results", "non-empty array", correlationId);
+}
+
 function validateJournalCreatePayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -850,8 +925,14 @@ export function validateMessage(input: unknown): ProtocolMessage {
     case "backend.actor.create":
       validateActorCreatePayload(payload, id);
       break;
+    case "backend.actor.update":
+      validateActorUpdatePayload(payload, id);
+      break;
     case "backend.journal.create":
       validateJournalCreatePayload(payload, id);
+      break;
+    case "backend.rolltable.create":
+      validateRollTableCreatePayload(payload, id);
       break;
     case "ping":
       // PingPayload is empty — no further validation needed.

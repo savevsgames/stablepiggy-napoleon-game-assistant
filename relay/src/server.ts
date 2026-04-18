@@ -256,7 +256,9 @@ async function handleMessage(
       case "relay.welcome":
       case "backend.chat.create":
       case "backend.actor.create":
+      case "backend.actor.update":
       case "backend.journal.create":
+      case "backend.rolltable.create":
         // Server-to-client message kinds — rejecting if a client sends one
         // catches confused clients or replay attacks.
         sendError(
