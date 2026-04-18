@@ -1,8 +1,15 @@
 # Node / build artifacts
 node_modules/
-dist/
 build/
 out/
+
+# Workspace build outputs:
+#   - protocol/dist and relay/dist are intermediates, kept out of git
+#   - dist/scripts/ (module esmodule output) IS committed by
+#     .github/workflows/build.yml on every push to main — it's the artifact
+#     Foundry loads via the /data/Data/modules/<id> symlink on the VPS
+protocol/dist/
+relay/dist/
 *.log
 *.log.*
 npm-debug.log*

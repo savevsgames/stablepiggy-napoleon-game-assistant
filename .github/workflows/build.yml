@@ -1,0 +1,50 @@
+name: Build module dist
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build protocol
+        run: npm run build:protocol
+
+      - name: Build module
+        run: npm run build:module
+
+      - name: Commit dist/scripts if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet HEAD -- dist/scripts; then
+            echo "No dist/scripts changes"
+          else
+            git add dist/scripts
+            git commit -m "chore(build): update dist/scripts [skip ci]"
+            git push
+          fi
