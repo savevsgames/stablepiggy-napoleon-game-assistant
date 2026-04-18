@@ -88,18 +88,21 @@ import { info, warn, error as logError, debug } from "./log.js";
 const MODULE_ID = "stablepiggy-napoleon-game-assistant";
 
 /** How long (ms) to wait for a backend response before replacing the
- *  placeholder with an error message. 60 seconds accommodates the full
- *  range of real backends:
+ *  placeholder with an error message. 180 seconds accommodates the full
+ *  range of real backends including multi-turn tool loops:
  *    - cloud providers (openai, anthropic, openrouter): 2-15s for a
- *      typical PF2e rules question, occasionally longer for complex
- *      generation tasks
- *    - self-hosted Ollama on CPU with an 8B model: 20-45s for the same
- *      query
- *  Before P3 this was 15s (enough only for the canned P2 stub). The
- *  ceiling is long enough that a real answer has room to arrive but
- *  short enough that a genuinely stuck backend still surfaces as a
- *  timeout instead of leaving the GM staring at "thinking…" forever. */
-const RESPONSE_TIMEOUT_MS = 60_000;
+ *      typical PF2e rules question, 30-90s for NPC + portrait flows
+ *      involving image generation
+ *    - self-hosted Ollama on CPU with an 8B model: 20-45s per turn
+ *    - image generation alone (gpt-image-1): 15-60s
+ *    - multi-turn Foundry flows (NPC create → portrait → actor update):
+ *      60-150s depending on provider and pipeline depth
+ *  Before P3 this was 15s (canned P2 stub ceiling). Then 60s (single-turn
+ *  chat). Now 180s (multi-turn loops). The next step past 180s is the
+ *  SSE streaming protocol (see handoff) which replaces this static timer
+ *  with a "no progress received in N seconds" heartbeat — required for
+ *  Phase B+ features like scene generation with walls. */
+const RESPONSE_TIMEOUT_MS = 180_000;
 
 // ── Foundry globals used by this file ──────────────────────────────────
 // Typed against Foundry VTT v13.351. See docs/foundry-conventions.md §2.
