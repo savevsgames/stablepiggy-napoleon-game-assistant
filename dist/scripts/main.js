@@ -1077,7 +1077,7 @@ class RelayClient {
   }
 }
 const MODULE_ID$1 = "stablepiggy-napoleon-game-assistant";
-const RESPONSE_TIMEOUT_MS = 6e4;
+const RESPONSE_TIMEOUT_MS = 18e4;
 function registerChatCommand(client) {
   const sessionId = computeSessionId();
   const proto = ui.chat.constructor.prototype;
