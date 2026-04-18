@@ -34,6 +34,7 @@ import { info, debug } from "./log.js";
 import { registerSettings } from "./settings.js";
 import { RelayClient, type RelayClientContext } from "./relay-client.js";
 import { registerChatCommand } from "./chat-command.js";
+import { registerChatButtonHandlers } from "./chat-buttons.js";
 import { registerSessionCapture } from "./session-capture.js";
 
 const MODULE_ID = "stablepiggy-napoleon-game-assistant";
@@ -113,6 +114,7 @@ Hooks.once("ready", () => {
   relayClient.connect();
 
   registerChatCommand(relayClient);
+  registerChatButtonHandlers(relayClient);
   registerSessionCapture(relayClient);
 });
 
