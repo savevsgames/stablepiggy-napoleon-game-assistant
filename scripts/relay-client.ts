@@ -95,6 +95,7 @@ import {
   type BackendActorUpdatePayload,
   type BackendJournalCreatePayload,
   type BackendRollTableCreatePayload,
+  type BackendSceneCreatePayload,
 } from "@stablepiggy-napoleon/protocol";
 
 import { info, warn, error as logError, debug } from "./log.js";
@@ -185,6 +186,24 @@ declare const RollTable: {
     data: Record<string, unknown>,
     options?: Record<string, unknown>
   ): Promise<{ id: string; name?: string } | undefined>;
+};
+
+/**
+ * Minimal subset of Foundry's Scene document we use in scene.create.
+ * `view()` activates the scene on the canvas — the GM sees the map
+ * immediately without having to click it in the nav bar.
+ */
+interface FoundryScene {
+  readonly id: string;
+  readonly name?: string;
+  view(): Promise<unknown>;
+}
+
+declare const Scene: {
+  create(
+    data: Record<string, unknown>,
+    options?: Record<string, unknown>
+  ): Promise<FoundryScene | undefined>;
 };
 
 declare const game: {
@@ -453,6 +472,7 @@ export class RelayClient {
         actorUpdate: true,
         journalCreate: true,
         rolltableCreate: true,
+        sceneCreate: true,
         systemId: this.ctx.systemId,
         systemVersion: this.ctx.systemVersion,
         foundryVersion: this.ctx.foundryVersion,
@@ -497,6 +517,9 @@ export class RelayClient {
         break;
       case "backend.rolltable.create":
         void this.handleRollTableCreate(message.payload);
+        break;
+      case "backend.scene.create":
+        void this.handleSceneCreate(message.payload);
         break;
       case "error":
         warn(
@@ -1137,6 +1160,101 @@ export class RelayClient {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logError(`RollTable.create threw for "${name}": ${msg}`, err);
+    }
+  }
+
+  /**
+   * Handle a `backend.scene.create` payload: create a Scene document with
+   * the image as its background. Phase B.1 defaults are deliberately
+   * minimal — no vision rules, no fog, global light on, no walls/lights/
+   * tokens. The GM gets a usable scene with zero manual configuration.
+   * Phase C will layer on vision/fog/walls; Phase D adds the atmospheric
+   * layer (tinted darkness, weather, ambient sounds, regions).
+   */
+  private async handleSceneCreate(
+    payload: BackendSceneCreatePayload
+  ): Promise<void> {
+    const { name, img, width, height } = payload;
+
+    if (!name || !img || !width || !height) {
+      warn("handleSceneCreate: invalid payload — missing name, img, width, or height");
+      return;
+    }
+
+    const gridSize = payload.gridSize ?? 100;
+    const gridDistance = payload.gridDistance ?? 5;
+    const gridUnits = payload.gridUnits ?? "ft";
+    const navigation = payload.navigation ?? true;
+    const openAfterCreate = payload.openAfterCreate ?? true;
+
+    try {
+      const sceneData: Record<string, unknown> = {
+        name,
+        navigation,
+        background: { src: img, fit: "fill" },
+        width,
+        height,
+        padding: 0.25,
+        backgroundColor: "#999999",
+        grid: {
+          type: 1, // square grid
+          size: gridSize,
+          style: "solidLines",
+          thickness: 1,
+          color: "#000000",
+          alpha: 0.2,
+          distance: gridDistance,
+          units: gridUnits,
+        },
+        // Minimal-defaults policy: GM shouldn't need to configure anything
+        // to use the scene. Tokens are universally visible, no fog, global
+        // light on. When Phase C walls land, these defaults shift for
+        // scenes marked combat/exploration.
+        tokenVision: false,
+        fog: { exploration: false },
+        environment: {
+          darknessLevel: 0,
+          globalLight: { enabled: true, alpha: 0.5 },
+        },
+        drawings: [],
+        tokens: [],
+        lights: [],
+        notes: [],
+        sounds: [],
+        regions: [],
+        templates: [],
+        tiles: [],
+        walls: [],
+      };
+
+      const created = await Scene.create(sceneData);
+      if (!created?.id) {
+        warn(`Scene.create returned no document for "${name}"`);
+        return;
+      }
+      info(`handleSceneCreate: created "${name}" (id=${created.id}, ${width}×${height}px)`);
+
+      if (openAfterCreate) {
+        try {
+          await created.view();
+        } catch (err) {
+          // Non-fatal — the scene exists in the sidebar even if activation failed
+          warn(
+            `scene created but view() failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+
+      try {
+        await ChatMessage.create({
+          content: `<p>✓ Created Scene: <strong>${escapeHtml(name)}</strong> (${width}×${height}px, grid ${gridSize}px / ${gridDistance}${gridUnits})</p>`,
+          style: CONST.CHAT_MESSAGE_STYLES.OTHER,
+          whisper: [this.ctx.gmUserId],
+        });
+      } catch { /* non-blocking confirmation whisper */ }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(`Scene.create threw for "${name}": ${msg}`, err);
     }
   }
 

@@ -103,6 +103,7 @@ export type MessageKind =
   | "backend.actor.update"
   | "backend.journal.create"
   | "backend.rolltable.create"
+  | "backend.scene.create"
   | "ping"
   | "pong"
   | "error";
@@ -152,6 +153,8 @@ export interface ClientCapabilities {
   readonly journalCreate: boolean;
   /** Module can create roll tables via `backend.rolltable.create`. */
   readonly rolltableCreate?: boolean;
+  /** Module can create scenes via `backend.scene.create`. */
+  readonly sceneCreate?: boolean;
   /** Foundry system module ID, e.g. "pf2e". */
   readonly systemId: string;
   /** Foundry system module version, e.g. "7.12.1". */
@@ -376,6 +379,37 @@ export interface BackendRollTableCreatePayload {
 }
 
 /**
+ * Payload for `backend.scene.create`. The backend sends this to create
+ * a Scene document — typically after generating a map image with
+ * `image_generate`. Phase B.1 defaults are deliberately minimal: no
+ * vision rules, no fog, global light on, no walls/lights/tokens. GMs
+ * get a usable scene with zero manual configuration. Phase C+ will
+ * layer vision/fog/walls on top as capabilities mature.
+ */
+export interface BackendSceneCreatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /** Scene title shown in the nav bar. */
+  readonly name: string;
+  /** Public HTTPS URL for the scene's background image (typically a signed Barn URL). */
+  readonly img: string;
+  /** Scene canvas width in pixels. Typically matches the generated image's width. */
+  readonly width: number;
+  /** Scene canvas height in pixels. Typically matches the generated image's height. */
+  readonly height: number;
+  /** Grid cell size in pixels. Default: 100. */
+  readonly gridSize?: number;
+  /** In-game distance represented by one grid cell. Default: 5 (PF2e ft). */
+  readonly gridDistance?: number;
+  /** Unit label for grid distance. Default: "ft". */
+  readonly gridUnits?: string;
+  /** Show the scene in the nav bar. Default: true. */
+  readonly navigation?: boolean;
+  /** Activate (view) the scene immediately after creation. Default: true. */
+  readonly openAfterCreate?: boolean;
+}
+
+/**
  * A single page in a `backend.journal.create` message. Tier 1 supports
  * text pages only; Tier 2 adds image, PDF, and video pages.
  */
@@ -498,6 +532,8 @@ export type BackendActorUpdateMessage = BaseMessage<"backend.actor.update", Back
 export type BackendJournalCreateMessage = BaseMessage<"backend.journal.create", BackendJournalCreatePayload>;
 /** `backend.rolltable.create` — backend → relay → module, create roll table. */
 export type BackendRollTableCreateMessage = BaseMessage<"backend.rolltable.create", BackendRollTableCreatePayload>;
+/** `backend.scene.create` — backend → relay → module, create scene with background map image. */
+export type BackendSceneCreateMessage = BaseMessage<"backend.scene.create", BackendSceneCreatePayload>;
 /** `ping` — both directions, keep-alive probe. */
 export type PingMessage = BaseMessage<"ping", PingPayload>;
 /** `pong` — both directions, response to ping. */
@@ -519,6 +555,7 @@ export type ProtocolMessage =
   | BackendActorUpdateMessage
   | BackendJournalCreateMessage
   | BackendRollTableCreateMessage
+  | BackendSceneCreateMessage
   | PingMessage
   | PongMessage
   | ErrorMessage;
@@ -806,6 +843,37 @@ function validateRollTableCreatePayload(
   assert((payload.results as unknown[]).length > 0, "payload.results", "non-empty array", correlationId);
 }
 
+function validateSceneCreatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isNonEmptyString(payload.name), "payload.name", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.img), "payload.img", "non-empty string", correlationId);
+  assert(typeof payload.width === "number" && payload.width > 0, "payload.width", "positive number", correlationId);
+  assert(typeof payload.height === "number" && payload.height > 0, "payload.height", "positive number", correlationId);
+  if ("gridSize" in payload) {
+    assert(typeof payload.gridSize === "number" && payload.gridSize > 0, "payload.gridSize", "positive number when present", correlationId);
+  }
+  if ("gridDistance" in payload) {
+    assert(typeof payload.gridDistance === "number" && payload.gridDistance > 0, "payload.gridDistance", "positive number when present", correlationId);
+  }
+  if ("gridUnits" in payload) {
+    assert(typeof payload.gridUnits === "string", "payload.gridUnits", "string when present", correlationId);
+  }
+  if ("navigation" in payload) {
+    assert(typeof payload.navigation === "boolean", "payload.navigation", "boolean when present", correlationId);
+  }
+  if ("openAfterCreate" in payload) {
+    assert(typeof payload.openAfterCreate === "boolean", "payload.openAfterCreate", "boolean when present", correlationId);
+  }
+}
+
 function validateJournalCreatePayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -933,6 +1001,9 @@ export function validateMessage(input: unknown): ProtocolMessage {
       break;
     case "backend.rolltable.create":
       validateRollTableCreatePayload(payload, id);
+      break;
+    case "backend.scene.create":
+      validateSceneCreatePayload(payload, id);
       break;
     case "ping":
       // PingPayload is empty — no further validation needed.
