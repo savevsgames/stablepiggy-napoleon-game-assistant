@@ -104,6 +104,7 @@ export type MessageKind =
   | "backend.journal.create"
   | "backend.rolltable.create"
   | "backend.scene.create"
+  | "backend.token.create"
   | "ping"
   | "pong"
   | "error";
@@ -155,6 +156,8 @@ export interface ClientCapabilities {
   readonly rolltableCreate?: boolean;
   /** Module can create scenes via `backend.scene.create`. */
   readonly sceneCreate?: boolean;
+  /** Module can place tokens on scenes via `backend.token.create`. */
+  readonly tokenCreate?: boolean;
   /** Foundry system module ID, e.g. "pf2e". */
   readonly systemId: string;
   /** Foundry system module version, e.g. "7.12.1". */
@@ -379,6 +382,40 @@ export interface BackendRollTableCreatePayload {
 }
 
 /**
+ * Payload for `backend.token.create`. The backend sends this to place
+ * a token of an existing Actor onto a Scene — typically after NPC
+ * creation when the GM asked to "spawn" or "place" them on the map.
+ * Coordinates default to grid cells (easier for an LLM to reason about:
+ * "put the goblin at grid 5,3" maps cleanly to the tactical layout).
+ * Coordinates in pixels are supported via coordMode: "px" for cases
+ * where the caller already has precise placement data.
+ *
+ * Defaults:
+ *   - sceneId omitted → place on the currently active scene
+ *   - coordMode omitted → "grid" (convert via scene.grid.size)
+ *   - disposition omitted → 0 (neutral)
+ *   - hidden omitted → false (visible to players)
+ */
+export interface BackendTokenCreatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /** Name of the Actor to spawn a token of (must already exist in Foundry's Actors sidebar). */
+  readonly actorName: string;
+  /** X coordinate (grid cell if coordMode is "grid", pixels if "px"). */
+  readonly x: number;
+  /** Y coordinate (grid cell if coordMode is "grid", pixels if "px"). */
+  readonly y: number;
+  /** Coordinate interpretation. Default: "grid". */
+  readonly coordMode?: "grid" | "px";
+  /** Target scene ID. Default: currently active scene. */
+  readonly sceneId?: string;
+  /** Token disposition: -1 hostile, 0 neutral, 1 friendly. Default: 0. */
+  readonly disposition?: -1 | 0 | 1;
+  /** If true, token is hidden from players on placement. Default: false. */
+  readonly hidden?: boolean;
+}
+
+/**
  * Payload for `backend.scene.create`. The backend sends this to create
  * a Scene document — typically after generating a map image with
  * `image_generate`. Phase B.1 defaults are deliberately minimal: no
@@ -534,6 +571,8 @@ export type BackendJournalCreateMessage = BaseMessage<"backend.journal.create", 
 export type BackendRollTableCreateMessage = BaseMessage<"backend.rolltable.create", BackendRollTableCreatePayload>;
 /** `backend.scene.create` — backend → relay → module, create scene with background map image. */
 export type BackendSceneCreateMessage = BaseMessage<"backend.scene.create", BackendSceneCreatePayload>;
+/** `backend.token.create` — backend → relay → module, place an actor's token on a scene. */
+export type BackendTokenCreateMessage = BaseMessage<"backend.token.create", BackendTokenCreatePayload>;
 /** `ping` — both directions, keep-alive probe. */
 export type PingMessage = BaseMessage<"ping", PingPayload>;
 /** `pong` — both directions, response to ping. */
@@ -556,6 +595,7 @@ export type ProtocolMessage =
   | BackendJournalCreateMessage
   | BackendRollTableCreateMessage
   | BackendSceneCreateMessage
+  | BackendTokenCreateMessage
   | PingMessage
   | PongMessage
   | ErrorMessage;
@@ -843,6 +883,33 @@ function validateRollTableCreatePayload(
   assert((payload.results as unknown[]).length > 0, "payload.results", "non-empty array", correlationId);
 }
 
+function validateTokenCreatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isNonEmptyString(payload.actorName), "payload.actorName", "non-empty string", correlationId);
+  assert(typeof payload.x === "number" && Number.isFinite(payload.x), "payload.x", "finite number", correlationId);
+  assert(typeof payload.y === "number" && Number.isFinite(payload.y), "payload.y", "finite number", correlationId);
+  if ("coordMode" in payload) {
+    assert(payload.coordMode === "grid" || payload.coordMode === "px", "payload.coordMode", "'grid' or 'px' when present", correlationId);
+  }
+  if ("sceneId" in payload) {
+    assert(typeof payload.sceneId === "string", "payload.sceneId", "string when present", correlationId);
+  }
+  if ("disposition" in payload) {
+    assert(payload.disposition === -1 || payload.disposition === 0 || payload.disposition === 1, "payload.disposition", "-1, 0, or 1 when present", correlationId);
+  }
+  if ("hidden" in payload) {
+    assert(typeof payload.hidden === "boolean", "payload.hidden", "boolean when present", correlationId);
+  }
+}
+
 function validateSceneCreatePayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -1004,6 +1071,9 @@ export function validateMessage(input: unknown): ProtocolMessage {
       break;
     case "backend.scene.create":
       validateSceneCreatePayload(payload, id);
+      break;
+    case "backend.token.create":
+      validateTokenCreatePayload(payload, id);
       break;
     case "ping":
       // PingPayload is empty — no further validation needed.

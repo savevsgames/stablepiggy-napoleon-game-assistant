@@ -96,6 +96,7 @@ import {
   type BackendJournalCreatePayload,
   type BackendRollTableCreatePayload,
   type BackendSceneCreatePayload,
+  type BackendTokenCreatePayload,
 } from "@stablepiggy-napoleon/protocol";
 
 import { info, warn, error as logError, debug } from "./log.js";
@@ -159,6 +160,10 @@ interface FoundryActor {
   readonly name?: string;
   readonly sheet: { render(force: boolean): void };
   update(data: Record<string, unknown>): Promise<unknown>;
+  /** Prototype token document used as the template for new placed tokens. */
+  readonly prototypeToken: {
+    toObject(): Record<string, unknown>;
+  };
 }
 
 declare const Actor: {
@@ -196,7 +201,13 @@ declare const RollTable: {
 interface FoundryScene {
   readonly id: string;
   readonly name?: string;
+  readonly grid: { readonly size: number };
   view(): Promise<unknown>;
+  createEmbeddedDocuments(
+    type: "Token",
+    data: ReadonlyArray<Record<string, unknown>>,
+    options?: Record<string, unknown>
+  ): Promise<ReadonlyArray<{ readonly id: string }>>;
 }
 
 declare const Scene: {
@@ -215,6 +226,10 @@ declare const game: {
   };
   actors: {
     getName(name: string): FoundryActor | undefined;
+  };
+  scenes: {
+    readonly active?: FoundryScene | null;
+    get(id: string): FoundryScene | undefined;
   };
   user: { readonly id: string };
   /**
@@ -473,6 +488,7 @@ export class RelayClient {
         journalCreate: true,
         rolltableCreate: true,
         sceneCreate: true,
+        tokenCreate: true,
         systemId: this.ctx.systemId,
         systemVersion: this.ctx.systemVersion,
         foundryVersion: this.ctx.foundryVersion,
@@ -520,6 +536,9 @@ export class RelayClient {
         break;
       case "backend.scene.create":
         void this.handleSceneCreate(message.payload);
+        break;
+      case "backend.token.create":
+        void this.handleTokenCreate(message.payload);
         break;
       case "error":
         warn(
@@ -1255,6 +1274,80 @@ export class RelayClient {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logError(`Scene.create threw for "${name}": ${msg}`, err);
+    }
+  }
+
+  /**
+   * Handle a `backend.token.create` payload: place a token of an existing
+   * Actor onto a Scene. Defaults to the currently-active scene and grid
+   * coordinates — the simplest form the LLM will reach for ("place the
+   * goblin at grid 5,3 on this map"). The prototype token from the actor
+   * is cloned so the token carries the actor's art, bar config, display
+   * settings, etc. — we only override x/y/disposition/hidden.
+   */
+  private async handleTokenCreate(
+    payload: BackendTokenCreatePayload
+  ): Promise<void> {
+    const { actorName, x, y } = payload;
+    const coordMode = payload.coordMode ?? "grid";
+    const disposition = payload.disposition ?? 0;
+    const hidden = payload.hidden ?? false;
+
+    if (!actorName) {
+      warn("handleTokenCreate: missing actorName");
+      return;
+    }
+
+    const scene = payload.sceneId
+      ? game.scenes.get(payload.sceneId)
+      : game.scenes.active;
+    if (!scene) {
+      warn(
+        `handleTokenCreate: ${payload.sceneId ? `scene "${payload.sceneId}" not found` : "no active scene"} — cannot place token`
+      );
+      return;
+    }
+
+    const actor = game.actors.getName(actorName);
+    if (!actor) {
+      warn(`handleTokenCreate: no actor found with name "${actorName}"`);
+      return;
+    }
+
+    const cellSize = scene.grid.size;
+    const pxX = coordMode === "px" ? x : x * cellSize;
+    const pxY = coordMode === "px" ? y : y * cellSize;
+
+    try {
+      const tokenData = actor.prototypeToken.toObject();
+      tokenData.x = pxX;
+      tokenData.y = pxY;
+      tokenData.disposition = disposition;
+      tokenData.hidden = hidden;
+      // Ensure the placed token is linked to the source actor's id so
+      // the token sheet opens the actor and updates reflect both ways.
+      tokenData.actorId = actor.id;
+
+      const created = await scene.createEmbeddedDocuments("Token", [tokenData]);
+      const tokenId = created[0]?.id;
+      if (tokenId) {
+        info(
+          `handleTokenCreate: placed "${actorName}" on scene "${scene.name ?? scene.id}" at ${coordMode} (${x},${y}) → px (${pxX},${pxY}), dispositon=${disposition}`
+        );
+        try {
+          const dispLabel = disposition === -1 ? "hostile" : disposition === 1 ? "friendly" : "neutral";
+          await ChatMessage.create({
+            content: `<p>✓ Placed token: <strong>${escapeHtml(actorName)}</strong> on <em>${escapeHtml(scene.name ?? "active scene")}</em> at grid (${Math.round(pxX / cellSize)}, ${Math.round(pxY / cellSize)}) · ${dispLabel}</p>`,
+            style: CONST.CHAT_MESSAGE_STYLES.OTHER,
+            whisper: [this.ctx.gmUserId],
+          });
+        } catch { /* non-blocking */ }
+      } else {
+        warn(`createEmbeddedDocuments returned no token for "${actorName}"`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(`Token placement threw for "${actorName}": ${msg}`, err);
     }
   }
 
