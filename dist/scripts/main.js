@@ -138,6 +138,24 @@ function validateRollTableCreatePayload(payload, correlationId) {
   assert(Array.isArray(payload.results), "payload.results", "an array", correlationId);
   assert(payload.results.length > 0, "payload.results", "non-empty array", correlationId);
 }
+function validateTokenCreatePayload(payload, correlationId) {
+  assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
+  assert(isNonEmptyString(payload.actorName), "payload.actorName", "non-empty string", correlationId);
+  assert(typeof payload.x === "number" && Number.isFinite(payload.x), "payload.x", "finite number", correlationId);
+  assert(typeof payload.y === "number" && Number.isFinite(payload.y), "payload.y", "finite number", correlationId);
+  if ("coordMode" in payload) {
+    assert(payload.coordMode === "grid" || payload.coordMode === "px", "payload.coordMode", "'grid' or 'px' when present", correlationId);
+  }
+  if ("sceneId" in payload) {
+    assert(typeof payload.sceneId === "string", "payload.sceneId", "string when present", correlationId);
+  }
+  if ("disposition" in payload) {
+    assert(payload.disposition === -1 || payload.disposition === 0 || payload.disposition === 1, "payload.disposition", "-1, 0, or 1 when present", correlationId);
+  }
+  if ("hidden" in payload) {
+    assert(typeof payload.hidden === "boolean", "payload.hidden", "boolean when present", correlationId);
+  }
+}
 function validateSceneCreatePayload(payload, correlationId) {
   assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
   assert(isNonEmptyString(payload.name), "payload.name", "non-empty string", correlationId);
@@ -243,6 +261,9 @@ function validateMessage(input) {
       break;
     case "backend.scene.create":
       validateSceneCreatePayload(payload, id);
+      break;
+    case "backend.token.create":
+      validateTokenCreatePayload(payload, id);
       break;
     case "ping":
       break;
@@ -487,6 +508,7 @@ class RelayClient {
         journalCreate: true,
         rolltableCreate: true,
         sceneCreate: true,
+        tokenCreate: true,
         systemId: this.ctx.systemId,
         systemVersion: this.ctx.systemVersion,
         foundryVersion: this.ctx.foundryVersion
@@ -531,6 +553,9 @@ class RelayClient {
         break;
       case "backend.scene.create":
         void this.handleSceneCreate(message.payload);
+        break;
+      case "backend.token.create":
+        void this.handleTokenCreate(message.payload);
         break;
       case "error":
         warn(
@@ -1146,6 +1171,68 @@ class RelayClient {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       error(`Scene.create threw for "${name}": ${msg}`, err);
+    }
+  }
+  /**
+   * Handle a `backend.token.create` payload: place a token of an existing
+   * Actor onto a Scene. Defaults to the currently-active scene and grid
+   * coordinates — the simplest form the LLM will reach for ("place the
+   * goblin at grid 5,3 on this map"). The prototype token from the actor
+   * is cloned so the token carries the actor's art, bar config, display
+   * settings, etc. — we only override x/y/disposition/hidden.
+   */
+  async handleTokenCreate(payload) {
+    const { actorName, x, y } = payload;
+    const coordMode = payload.coordMode ?? "grid";
+    const disposition = payload.disposition ?? 0;
+    const hidden = payload.hidden ?? false;
+    if (!actorName) {
+      warn("handleTokenCreate: missing actorName");
+      return;
+    }
+    const scene = payload.sceneId ? game.scenes.get(payload.sceneId) : game.scenes.active;
+    if (!scene) {
+      warn(
+        `handleTokenCreate: ${payload.sceneId ? `scene "${payload.sceneId}" not found` : "no active scene"} — cannot place token`
+      );
+      return;
+    }
+    const actor = game.actors.getName(actorName);
+    if (!actor) {
+      warn(`handleTokenCreate: no actor found with name "${actorName}"`);
+      return;
+    }
+    const cellSize = scene.grid.size;
+    const pxX = coordMode === "px" ? x : x * cellSize;
+    const pxY = coordMode === "px" ? y : y * cellSize;
+    try {
+      const tokenData = actor.prototypeToken.toObject();
+      tokenData.x = pxX;
+      tokenData.y = pxY;
+      tokenData.disposition = disposition;
+      tokenData.hidden = hidden;
+      tokenData.actorId = actor.id;
+      const created = await scene.createEmbeddedDocuments("Token", [tokenData]);
+      const tokenId = created[0]?.id;
+      if (tokenId) {
+        info(
+          `handleTokenCreate: placed "${actorName}" on scene "${scene.name ?? scene.id}" at ${coordMode} (${x},${y}) → px (${pxX},${pxY}), dispositon=${disposition}`
+        );
+        try {
+          const dispLabel = disposition === -1 ? "hostile" : disposition === 1 ? "friendly" : "neutral";
+          await ChatMessage.create({
+            content: `<p>✓ Placed token: <strong>${escapeHtml$1(actorName)}</strong> on <em>${escapeHtml$1(scene.name ?? "active scene")}</em> at grid (${Math.round(pxX / cellSize)}, ${Math.round(pxY / cellSize)}) · ${dispLabel}</p>`,
+            style: CONST.CHAT_MESSAGE_STYLES.OTHER,
+            whisper: [this.ctx.gmUserId]
+          });
+        } catch {
+        }
+      } else {
+        warn(`createEmbeddedDocuments returned no token for "${actorName}"`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error(`Token placement threw for "${actorName}": ${msg}`, err);
     }
   }
   // ── Timers ──────────────────────────────────────────────────────────
