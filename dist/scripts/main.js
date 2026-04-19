@@ -138,6 +138,28 @@ function validateRollTableCreatePayload(payload, correlationId) {
   assert(Array.isArray(payload.results), "payload.results", "an array", correlationId);
   assert(payload.results.length > 0, "payload.results", "non-empty array", correlationId);
 }
+function validateSceneCreatePayload(payload, correlationId) {
+  assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
+  assert(isNonEmptyString(payload.name), "payload.name", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.img), "payload.img", "non-empty string", correlationId);
+  assert(typeof payload.width === "number" && payload.width > 0, "payload.width", "positive number", correlationId);
+  assert(typeof payload.height === "number" && payload.height > 0, "payload.height", "positive number", correlationId);
+  if ("gridSize" in payload) {
+    assert(typeof payload.gridSize === "number" && payload.gridSize > 0, "payload.gridSize", "positive number when present", correlationId);
+  }
+  if ("gridDistance" in payload) {
+    assert(typeof payload.gridDistance === "number" && payload.gridDistance > 0, "payload.gridDistance", "positive number when present", correlationId);
+  }
+  if ("gridUnits" in payload) {
+    assert(typeof payload.gridUnits === "string", "payload.gridUnits", "string when present", correlationId);
+  }
+  if ("navigation" in payload) {
+    assert(typeof payload.navigation === "boolean", "payload.navigation", "boolean when present", correlationId);
+  }
+  if ("openAfterCreate" in payload) {
+    assert(typeof payload.openAfterCreate === "boolean", "payload.openAfterCreate", "boolean when present", correlationId);
+  }
+}
 function validateJournalCreatePayload(payload, correlationId) {
   assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
   assert(isNonEmptyString(payload.name), "payload.name", "non-empty string", correlationId);
@@ -218,6 +240,9 @@ function validateMessage(input) {
       break;
     case "backend.rolltable.create":
       validateRollTableCreatePayload(payload, id);
+      break;
+    case "backend.scene.create":
+      validateSceneCreatePayload(payload, id);
       break;
     case "ping":
       break;
@@ -461,6 +486,7 @@ class RelayClient {
         actorUpdate: true,
         journalCreate: true,
         rolltableCreate: true,
+        sceneCreate: true,
         systemId: this.ctx.systemId,
         systemVersion: this.ctx.systemVersion,
         foundryVersion: this.ctx.foundryVersion
@@ -502,6 +528,9 @@ class RelayClient {
         break;
       case "backend.rolltable.create":
         void this.handleRollTableCreate(message.payload);
+        break;
+      case "backend.scene.create":
+        void this.handleSceneCreate(message.payload);
         break;
       case "error":
         warn(
@@ -1030,6 +1059,93 @@ class RelayClient {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       error(`RollTable.create threw for "${name}": ${msg}`, err);
+    }
+  }
+  /**
+   * Handle a `backend.scene.create` payload: create a Scene document with
+   * the image as its background. Phase B.1 defaults are deliberately
+   * minimal — no vision rules, no fog, global light on, no walls/lights/
+   * tokens. The GM gets a usable scene with zero manual configuration.
+   * Phase C will layer on vision/fog/walls; Phase D adds the atmospheric
+   * layer (tinted darkness, weather, ambient sounds, regions).
+   */
+  async handleSceneCreate(payload) {
+    const { name, img, width, height } = payload;
+    if (!name || !img || !width || !height) {
+      warn("handleSceneCreate: invalid payload — missing name, img, width, or height");
+      return;
+    }
+    const gridSize = payload.gridSize ?? 100;
+    const gridDistance = payload.gridDistance ?? 5;
+    const gridUnits = payload.gridUnits ?? "ft";
+    const navigation = payload.navigation ?? true;
+    const openAfterCreate = payload.openAfterCreate ?? true;
+    try {
+      const sceneData = {
+        name,
+        navigation,
+        background: { src: img, fit: "fill" },
+        width,
+        height,
+        padding: 0.25,
+        backgroundColor: "#999999",
+        grid: {
+          type: 1,
+          // square grid
+          size: gridSize,
+          style: "solidLines",
+          thickness: 1,
+          color: "#000000",
+          alpha: 0.2,
+          distance: gridDistance,
+          units: gridUnits
+        },
+        // Minimal-defaults policy: GM shouldn't need to configure anything
+        // to use the scene. Tokens are universally visible, no fog, global
+        // light on. When Phase C walls land, these defaults shift for
+        // scenes marked combat/exploration.
+        tokenVision: false,
+        fog: { exploration: false },
+        environment: {
+          darknessLevel: 0,
+          globalLight: { enabled: true, alpha: 0.5 }
+        },
+        drawings: [],
+        tokens: [],
+        lights: [],
+        notes: [],
+        sounds: [],
+        regions: [],
+        templates: [],
+        tiles: [],
+        walls: []
+      };
+      const created = await Scene.create(sceneData);
+      if (!created?.id) {
+        warn(`Scene.create returned no document for "${name}"`);
+        return;
+      }
+      info(`handleSceneCreate: created "${name}" (id=${created.id}, ${width}×${height}px)`);
+      if (openAfterCreate) {
+        try {
+          await created.view();
+        } catch (err) {
+          warn(
+            `scene created but view() failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+      try {
+        await ChatMessage.create({
+          content: `<p>✓ Created Scene: <strong>${escapeHtml$1(name)}</strong> (${width}×${height}px, grid ${gridSize}px / ${gridDistance}${gridUnits})</p>`,
+          style: CONST.CHAT_MESSAGE_STYLES.OTHER,
+          whisper: [this.ctx.gmUserId]
+        });
+      } catch {
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error(`Scene.create threw for "${name}": ${msg}`, err);
     }
   }
   // ── Timers ──────────────────────────────────────────────────────────
