@@ -85,6 +85,7 @@
 import type { RelayClient } from "./relay-client.js";
 import { info, warn, error as logError, debug } from "./log.js";
 import { captureViewportSnapshot } from "./snapshot.js";
+import { listWorldFiles } from "./world-files.js";
 
 const MODULE_ID = "stablepiggy-napoleon-game-assistant";
 
@@ -286,6 +287,11 @@ async function handleNapoleonQuery(
   // so the module sends optimistically when a scene is available.
   const snapshot = await captureViewportSnapshot();
 
+  // Phase B.4: list existing files under worlds/<world>/napoleon/ so
+  // Napoleon can reuse them before generating new content. Empty array
+  // on first query in a fresh world; capped at 1000 entries module-side.
+  const worldFiles = await listWorldFiles(game.world.id);
+
   // Send the query. This returns the message id that the backend will
   // echo back as `correlationId` on the response — which is what we
   // key the placeholder replacement on.
@@ -302,6 +308,7 @@ async function handleNapoleonQuery(
       recentChat: [],
     },
     ...(snapshot ? { snapshot } : {}),
+    ...(worldFiles.length > 0 ? { worldFiles } : {}),
   });
 
   if (queryId === null) {

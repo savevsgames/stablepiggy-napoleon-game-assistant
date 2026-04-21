@@ -97,10 +97,13 @@ import {
   type BackendRollTableCreatePayload,
   type BackendSceneCreatePayload,
   type BackendTokenCreatePayload,
+  type BackendDataUploadPayload,
+  type ClientDataUploadAckPayload,
 } from "@stablepiggy-napoleon/protocol";
 
 import { info, warn, error as logError, debug } from "./log.js";
 import { getAuthToken, getRelayEndpoint } from "./settings.js";
+import { uploadToWorld } from "./world-files.js";
 
 // ── Foundry globals used by the chat.create handler ────────────────────
 // Typed against Foundry VTT v13.351. Kept minimal per
@@ -423,6 +426,34 @@ export class RelayClient {
   }
 
   /**
+   * Send a `client.world_save_request` to the relay. The relay forwards
+   * to the backend's /world-save endpoint, receives a list of commands
+   * (typically a single backend.data.upload with an optional follow-up),
+   * and pushes them back over the WebSocket. From this caller's
+   * perspective: send-and-forget; the normal handler dispatch picks up
+   * the inbound commands.
+   *
+   * Returns the message id on success, null if not connected.
+   */
+  sendWorldSaveRequest(
+    payload: Omit<import("@stablepiggy-napoleon/protocol").ClientWorldSaveRequestPayload, "sessionId"> & { sessionId?: string }
+  ): string | null {
+    if (this.status !== "connected" || !this.socket) {
+      warn(`sendWorldSaveRequest called while status=${this.status} — dropping`);
+      return null;
+    }
+    // Compute the session ID the same way chat-command.ts does. The caller
+    // can override by passing `sessionId`, but the default is the stable
+    // `napoleon-<worldId>-<gmUserId>` value the module uses everywhere.
+    const sessionId =
+      payload.sessionId ?? `napoleon-${this.ctx.worldId}-${this.ctx.gmUserId}`;
+    const msg = makeMessage("client.world_save_request", { ...payload, sessionId });
+    this.socket.send(JSON.stringify(msg));
+    debug(`→ client.world_save_request (slug=${payload.slug}, target=${payload.targetType})`);
+    return msg.id;
+  }
+
+  /**
    * Send a `client.session_event` to the relay. Fire-and-forget — session
    * events are buffered relay-side and flushed in batches. Returns the
    * message id on success, null if not connected.
@@ -540,6 +571,9 @@ export class RelayClient {
       case "backend.token.create":
         void this.handleTokenCreate(message.payload);
         break;
+      case "backend.data.upload":
+        void this.handleDataUpload(message.payload, message.id);
+        break;
       case "error":
         warn(
           `relay sent error (code=${message.payload.code}): ${message.payload.message}`
@@ -556,6 +590,8 @@ export class RelayClient {
       case "client.hello":
       case "client.query":
       case "client.session_event":
+      case "client.data_upload_ack":
+      case "client.world_save_request":
         warn(
           `received ${message.kind} from relay — this kind is client→relay only`
         );
@@ -1349,6 +1385,101 @@ export class RelayClient {
       const msg = err instanceof Error ? err.message : String(err);
       logError(`Token placement threw for "${actorName}": ${msg}`, err);
     }
+  }
+
+  /**
+   * Handle a `backend.data.upload` payload: fetch the signed Barn URL,
+   * upload the bytes to Foundry Data at `targetPath` via FilePicker,
+   * then (if `followUp` is present) dispatch it through the normal
+   * handler for that kind. Emits `client.data_upload_ack` with the
+   * outcome for backend observability. On failure, surfaces the error
+   * via ui.notifications.error — the chat preview button remains
+   * clickable so the GM can retry.
+   *
+   * Fail loud per RFC Q4 — no automatic retry, GM decides.
+   */
+  private async handleDataUpload(
+    payload: BackendDataUploadPayload,
+    originatingMessageId: string
+  ): Promise<void> {
+    const { signedUrl, targetPath, followUp, correlationId } = payload;
+
+    try {
+      await uploadToWorld(signedUrl, targetPath);
+      info(`handleDataUpload: uploaded to ${targetPath}`);
+
+      this.sendDataUploadAck({
+        correlationId,
+        targetPath,
+        ok: true,
+      });
+
+      // Dispatch follow-up command, if any. Backend pre-baked the Data
+      // path into the relevant img/src fields (see buildFollowUp in
+      // dashboard/routes/foundry.ts), so handlers execute verbatim.
+      if (followUp) {
+        switch (followUp.kind) {
+          case "backend.chat.create":
+            await this.handleChatCreate(followUp.payload);
+            break;
+          case "backend.actor.create":
+            await this.handleActorCreate(followUp.payload);
+            break;
+          case "backend.actor.update":
+            await this.handleActorUpdate(followUp.payload);
+            break;
+          case "backend.journal.create":
+            await this.handleJournalCreate(followUp.payload);
+            break;
+          case "backend.rolltable.create":
+            await this.handleRollTableCreate(followUp.payload);
+            break;
+          case "backend.scene.create":
+            await this.handleSceneCreate(followUp.payload);
+            break;
+          case "backend.token.create":
+            await this.handleTokenCreate(followUp.payload);
+            break;
+          default: {
+            // Exhaustiveness — protocol union narrows this to never.
+            const exhaustive: never = followUp;
+            void exhaustive;
+          }
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(
+        `handleDataUpload failed for ${targetPath} (msgId=${originatingMessageId}): ${msg}`,
+        err
+      );
+      try {
+        // Foundry's global `ui.notifications` is available in module scope
+        // but not declared locally in this file — reach it via globalThis
+        // to avoid a duplicate `declare const ui` block.
+        (globalThis as unknown as { ui?: { notifications?: { error(m: string): void } } })
+          .ui?.notifications?.error(`Save to World failed: ${msg}`);
+      } catch { /* notifications API unavailable — already logged */ }
+      this.sendDataUploadAck({
+        correlationId,
+        targetPath,
+        ok: false,
+        error: msg,
+      });
+    }
+  }
+
+  /**
+   * Emit a `client.data_upload_ack` over the socket. Fire-and-forget
+   * telemetry — backend logs it but doesn't branch on the outcome.
+   */
+  private sendDataUploadAck(payload: ClientDataUploadAckPayload): void {
+    if (this.status !== "connected" || !this.socket) {
+      debug(`sendDataUploadAck skipped (status=${this.status}) for ${payload.targetPath}`);
+      return;
+    }
+    const msg = makeMessage("client.data_upload_ack", payload);
+    this.socket.send(JSON.stringify(msg));
   }
 
   // ── Timers ──────────────────────────────────────────────────────────

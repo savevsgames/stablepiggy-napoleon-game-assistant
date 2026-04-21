@@ -44,6 +44,7 @@ import {
   type ClientHelloMessage,
   type ClientQueryMessage,
   type ClientSessionEventMessage,
+  type ClientWorldSaveRequestMessage,
   type PingMessage,
   type ErrorCode,
 } from "@stablepiggy-napoleon/protocol";
@@ -59,6 +60,7 @@ import {
 } from "./connection-state.js";
 import {
   forwardQueryToBackend,
+  forwardWorldSaveToBackend,
   resolveIdentityFromApiKey,
 } from "./backend-client.js";
 import {
@@ -242,6 +244,24 @@ async function handleMessage(
       case "client.session_event":
         handleSessionEvent(state, message, config, log);
         break;
+      case "client.data_upload_ack":
+        // Phase B.4 telemetry ping — log it and move on. Backend-side
+        // observability for world-save outcomes comes from the /world-save
+        // endpoint's audit row; the ack here provides redundant visibility
+        // at the relay layer and is kept narrow on purpose.
+        log.info(
+          {
+            targetPath: message.payload.targetPath,
+            ok: message.payload.ok,
+            error: message.payload.error,
+            correlationId: message.payload.correlationId,
+          },
+          "data_upload_ack"
+        );
+        break;
+      case "client.world_save_request":
+        await handleWorldSaveRequest(state, message, config, log);
+        break;
       case "pong":
         // Clients sending pongs is rare in M2 (relay doesn't initiate pings
         // yet). Log and ignore.
@@ -261,6 +281,7 @@ async function handleMessage(
       case "backend.rolltable.create":
       case "backend.scene.create":
       case "backend.token.create":
+      case "backend.data.upload":
         // Server-to-client message kinds — rejecting if a client sends one
         // catches confused clients or replay attacks.
         sendError(
@@ -468,6 +489,75 @@ async function handleQuery(
       state,
       "backend_unreachable",
       `backend call failed: ${msg}`,
+      message.id
+    );
+  }
+}
+
+async function handleWorldSaveRequest(
+  state: ConnectionState,
+  message: ClientWorldSaveRequestMessage,
+  config: Config,
+  log: Logger
+): Promise<void> {
+  // Same gate as handleQuery — hello must be completed so the backend
+  // knows which identity the save applies to.
+  if (!state.helloCompleted) {
+    log.warn({ messageId: message.id }, "rejected world-save on hello-less connection");
+    sendError(
+      state,
+      "validation_failed",
+      "client.hello required before client.world_save_request",
+      message.id
+    );
+    return;
+  }
+
+  try {
+    const response = await forwardWorldSaveToBackend(
+      state,
+      {
+        barnPath: message.payload.barnPath,
+        category: message.payload.category,
+        slug: message.payload.slug,
+        targetType: message.payload.targetType,
+        targetAction: message.payload.targetAction,
+        params: message.payload.params,
+      },
+      message.payload.sessionId,
+      message.id,
+      config,
+      log
+    );
+
+    // Forward each backend command as a protocol message. The module's
+    // existing handler dispatch picks up backend.data.upload (and, via
+    // the embedded follow-up, whatever entity create/update needs to
+    // run after the Data upload completes).
+    for (const command of response.commands) {
+      const wrapped = makeMessage(
+        command.kind as Parameters<typeof makeMessage>[0],
+        command.payload as never
+      );
+      sendMessage(state, wrapped);
+    }
+
+    log.info(
+      {
+        messageId: message.id,
+        barnPath: message.payload.barnPath,
+        slug: message.payload.slug,
+        commandCount: response.commands.length,
+      },
+      "world-save request processed"
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown backend error";
+    log.error({ err: msg, messageId: message.id }, "world-save forwarding failed");
+    sendError(
+      state,
+      "backend_unreachable",
+      `world-save failed: ${msg}`,
       message.id
     );
   }

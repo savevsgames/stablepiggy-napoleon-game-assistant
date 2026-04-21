@@ -194,6 +194,132 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+// ── World save forwarding (Phase B.4) ─────────────────────────────────
+
+/**
+ * Shape of the follow-up command embedded in a backend.data.upload — widened
+ * to carry any backend.* kind the backend might synthesize. The relay just
+ * forwards it, doesn't interpret.
+ */
+export interface BackendDataUploadPayload {
+  readonly correlationId: string | null;
+  readonly signedUrl: string;
+  readonly targetPath: string;
+  readonly followUp?: {
+    readonly kind: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+  };
+}
+
+/**
+ * Request shape for POST /my/foundry/world-save. The relay fills worldId,
+ * sessionId, and identityId from authenticated connection state — the
+ * module only supplies what identifies the Barn file and the Foundry
+ * target.
+ */
+export interface WorldSaveRequest {
+  readonly barnPath: string;
+  readonly category: string;
+  readonly slug: string;
+  readonly targetType: string;
+  readonly targetAction: string;
+  readonly params?: Readonly<Record<string, unknown>>;
+}
+
+export interface WorldSaveResponse {
+  readonly commands: ReadonlyArray<{
+    readonly kind: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+  }>;
+}
+
+/**
+ * Forward a world-save request to the backend. Reuses the relay's service
+ * token (same auth as /my/foundry/query). Throws on any failure so the
+ * server-side handler can surface a protocol `error` to the client.
+ */
+export async function forwardWorldSaveToBackend(
+  connection: ConnectionState,
+  request: WorldSaveRequest,
+  sessionId: string,
+  messageId: string,
+  config: Config,
+  log: Logger
+): Promise<WorldSaveResponse> {
+  if (!connection.identityId || !connection.worldId) {
+    throw new Error(
+      "connection state missing identityId/worldId — client.hello was not completed"
+    );
+  }
+
+  if (!config.backendUrl) {
+    throw new Error(
+      "backend URL is not configured — cannot forward world-save request"
+    );
+  }
+
+  // Derive the world-save URL from the query URL. `backendUrl` typically
+  // points at `.../my/foundry/query`; the world-save endpoint is a
+  // sibling at `.../my/foundry/world-save`. Simple path swap avoids a
+  // new config knob.
+  const worldSaveUrl = config.backendUrl.replace(/\/query$/, "/world-save");
+  if (worldSaveUrl === config.backendUrl) {
+    throw new Error(
+      `cannot derive world-save URL: backendUrl does not end with /query (got "${config.backendUrl}")`
+    );
+  }
+
+  const body = {
+    worldId: connection.worldId,
+    sessionId,
+    identityId: connection.identityId,
+    barnPath: request.barnPath,
+    category: request.category,
+    slug: request.slug,
+    targetType: request.targetType,
+    targetAction: request.targetAction,
+    params: request.params ?? {},
+  };
+
+  const startedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(worldSaveUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Authorization: `Bearer ${config.backendToken}`,
+        "X-Correlation-Id": messageId,
+        "X-Relay-Version": RELAY_VERSION,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown fetch error";
+    throw new Error(`world-save backend unreachable: ${msg}`);
+  }
+
+  const durationMs = Date.now() - startedAt;
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "<unreadable>");
+    throw new Error(
+      `world-save backend HTTP ${response.status} in ${durationMs}ms: ${text.slice(0, 200)}`
+    );
+  }
+
+  const parsed = (await response.json()) as WorldSaveResponse;
+  log.debug(
+    {
+      messageId,
+      commandCount: parsed.commands.length,
+      durationMs,
+    },
+    "world-save backend responded"
+  );
+  return parsed;
+}
+
 // ── Identity resolution (M2.1) ──────────────────────────────────────────
 //
 // When a GM authenticates with a StablePiggy API key (any `authToken` in

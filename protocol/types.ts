@@ -98,6 +98,8 @@ export type MessageKind =
   | "relay.welcome"
   | "client.query"
   | "client.session_event"
+  | "client.data_upload_ack"
+  | "client.world_save_request"
   | "backend.chat.create"
   | "backend.actor.create"
   | "backend.actor.update"
@@ -105,6 +107,7 @@ export type MessageKind =
   | "backend.rolltable.create"
   | "backend.scene.create"
   | "backend.token.create"
+  | "backend.data.upload"
   | "ping"
   | "pong"
   | "error";
@@ -158,6 +161,8 @@ export interface ClientCapabilities {
   readonly sceneCreate?: boolean;
   /** Module can place tokens on scenes via `backend.token.create`. */
   readonly tokenCreate?: boolean;
+  /** Module can persist Barn files to Foundry Data via `backend.data.upload` (Phase B.4 durability). */
+  readonly dataUpload?: boolean;
   /** Foundry system module ID, e.g. "pf2e". */
   readonly systemId: string;
   /** Foundry system module version, e.g. "7.12.1". */
@@ -301,6 +306,40 @@ export interface ClientQuerySnapshot {
 }
 
 /**
+ * Categories used under `Data/worlds/<world>/napoleon/<category>/` for
+ * persisted Foundry world data (Phase B.4). Bounded set — if the GM has
+ * content that doesn't fit the named slots, it goes in `gm/` as a
+ * catch-all. Napoleon browses this tree via `worldFiles` on every query.
+ */
+export const WORLD_FILE_CATEGORIES = [
+  "npcs",
+  "scenes",
+  "maps",
+  "items",
+  "journals",
+  "gm",
+] as const;
+export type WorldFileCategory = (typeof WORLD_FILE_CATEGORIES)[number];
+
+/**
+ * Metadata about a single file the module discovered under
+ * `worlds/<world>/napoleon/` via `FilePicker.browse`. Sent alongside
+ * `client.query` so Napoleon can reuse existing assets instead of
+ * regenerating (the 80/20 "this feels magic" feature). Capped at 1000
+ * entries per query — worlds with more get truncated + a warn log.
+ */
+export interface ClientWorldFile {
+  /** Data-relative path, e.g. `"worlds/otari-pub/napoleon/npcs/pippa.png"`. */
+  readonly path: string;
+  /** Which subfolder the file was found in. */
+  readonly category: WorldFileCategory;
+  /** Filename without extension, e.g. `"pippa"`. Used as the reuse key. */
+  readonly slug: string;
+  /** File size in bytes. Informational only. */
+  readonly sizeBytes: number;
+}
+
+/**
  * Payload for `client.query`. The module sends this when the GM types
  * `/napoleon <query>` in Foundry chat. The relay forwards it to the AI
  * backend, which responds with zero or more `backend.*` command messages.
@@ -324,6 +363,13 @@ export interface ClientQueryPayload {
    * resolved model does not support image input.
    */
   readonly snapshot?: ClientQuerySnapshot;
+  /**
+   * Existing Foundry Data files under `worlds/<world>/napoleon/` so
+   * Napoleon can reuse them before generating new content. Discovered
+   * by the module via `FilePicker.browse` at send time. Capped at
+   * 1000 entries; module truncates beyond that and warns in its log.
+   */
+  readonly worldFiles?: readonly ClientWorldFile[];
 }
 
 /**
@@ -517,6 +563,105 @@ export interface BackendJournalCreatePayload {
   readonly folderId?: string;
 }
 
+// ============================================================================
+// Phase B.4 — Data persistence (Barn → Foundry Data cache)
+// ============================================================================
+
+/**
+ * A backend.* command that the module should execute AFTER a successful
+ * `backend.data.upload`. Typically the entity-create/update that needed
+ * the newly-persisted Data path as its `img` field. The module rewrites
+ * the `img` field (or equivalent) to the upload target before dispatching.
+ *
+ * NOT a full protocol envelope — just (kind, payload). The outer
+ * BackendDataUploadMessage provides the envelope fields (v/id/ts).
+ */
+export type BackendFollowUpCommand =
+  | { readonly kind: "backend.chat.create"; readonly payload: BackendChatCreatePayload }
+  | { readonly kind: "backend.actor.create"; readonly payload: BackendActorCreatePayload }
+  | { readonly kind: "backend.actor.update"; readonly payload: BackendActorUpdatePayload }
+  | { readonly kind: "backend.journal.create"; readonly payload: BackendJournalCreatePayload }
+  | { readonly kind: "backend.rolltable.create"; readonly payload: BackendRollTableCreatePayload }
+  | { readonly kind: "backend.scene.create"; readonly payload: BackendSceneCreatePayload }
+  | { readonly kind: "backend.token.create"; readonly payload: BackendTokenCreatePayload };
+
+/**
+ * Payload for `backend.data.upload`. Backend sends this when the GM clicks
+ * a "Save to World" button — the module fetches the signed URL bytes and
+ * uploads them to Foundry's Data directory at `targetPath`, then (if
+ * `followUp` is present) dispatches the follow-up command with `img`
+ * rewritten to the Data-relative path.
+ *
+ * Replace-existing collision handling: the module pre-checks the target
+ * path with `FilePicker.browse` and emits a `ui.notifications.info` if
+ * an existing file is being replaced. No versioning / auto-append. See
+ * `local/specs/FOUNDRY-DATA-PERSISTENCE-RFC.md §4` for the rationale.
+ */
+export interface BackendDataUploadPayload {
+  readonly correlationId: string | null;
+  /** Short-lived signed Barn URL the module fetches to get the bytes. 5-min TTL typical. */
+  readonly signedUrl: string;
+  /** Destination path inside Foundry Data, e.g. `"worlds/otari-pub/napoleon/npcs/pippa.png"`. */
+  readonly targetPath: string;
+  /**
+   * Optional command to execute after successful upload. Module rewrites
+   * the `img` field (or `src` for journal pages) to `targetPath` before
+   * dispatching. On upload failure the follow-up is NOT executed — the
+   * GM gets a notification error and the chat preview button stays
+   * available for retry (see Q4 in the RFC).
+   */
+  readonly followUp?: BackendFollowUpCommand;
+}
+
+/**
+ * Payload for `client.world_save_request`. Module sends this when the GM
+ * clicks a "Save to World" button in chat. The relay forwards it to the
+ * backend's `/my/foundry/world-save` endpoint (supplying session fields
+ * the module doesn't have — worldId, identityId, sessionId come from
+ * the authenticated relay connection state), then pushes each returned
+ * command back as a separate protocol message. From the module's
+ * perspective: send once, let the normal handler dispatch process the
+ * incoming `backend.data.upload` (+ any follow-up).
+ *
+ * See `local/specs/FOUNDRY-DATA-PERSISTENCE-RFC.md §7` (corrected
+ * 2026-04-20) for the full rationale — the original direct-POST
+ * approach would have required opening the backend endpoint to
+ * dv-API-key auth with subdomain CORS complexity.
+ */
+export interface ClientWorldSaveRequestPayload {
+  /** Optional — message ID of the originating client.query, if any. */
+  readonly correlationId?: string;
+  /** Stable session identifier (same value the module passes on client.query). */
+  readonly sessionId: string;
+  /** Barn-relative path of the source file (e.g. `"outputs/generated/xxx.png"`). */
+  readonly barnPath: string;
+  /** Target subfolder under `worlds/<world>/napoleon/`. */
+  readonly category: WorldFileCategory;
+  /** kebab-case filename without extension. Must match `/^[a-z0-9]+(-[a-z0-9]+)*$/`. */
+  readonly slug: string;
+  /** What kind of Foundry entity the upload will be applied to (or `save_only` for pure library add). */
+  readonly targetType: "actor" | "scene" | "token" | "journal" | "save_only";
+  /** Whether the follow-up creates a new entity or updates an existing one. Ignored for `save_only`. */
+  readonly targetAction: "create" | "update";
+  /** Parameters for the follow-up command; shape varies per targetType. Omit for save_only. */
+  readonly params?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Payload for `client.data_upload_ack`. Telemetry ping emitted by the
+ * module after attempting a `backend.data.upload`. Backend logs it for
+ * observability + failure-rate dashboards; no branching logic depends
+ * on it. On `ok: false` the GM has already seen a `ui.notifications.error`
+ * locally — the backend doesn't need to act.
+ */
+export interface ClientDataUploadAckPayload {
+  readonly correlationId: string | null;
+  readonly targetPath: string;
+  readonly ok: boolean;
+  /** Short human-readable failure reason when `ok: false`. Absent when `ok: true`. */
+  readonly error?: string;
+}
+
 /**
  * The type of notable session event captured by the module's auto-capture
  * hook. The relay buffers these and flushes them to the backend in batches
@@ -610,6 +755,12 @@ export type BackendRollTableCreateMessage = BaseMessage<"backend.rolltable.creat
 export type BackendSceneCreateMessage = BaseMessage<"backend.scene.create", BackendSceneCreatePayload>;
 /** `backend.token.create` — backend → relay → module, place an actor's token on a scene. */
 export type BackendTokenCreateMessage = BaseMessage<"backend.token.create", BackendTokenCreatePayload>;
+/** `backend.data.upload` — backend → relay → module, persist Barn file into Foundry Data (+ optional follow-up). */
+export type BackendDataUploadMessage = BaseMessage<"backend.data.upload", BackendDataUploadPayload>;
+/** `client.data_upload_ack` — module → relay → backend, telemetry for a data.upload outcome. */
+export type ClientDataUploadAckMessage = BaseMessage<"client.data_upload_ack", ClientDataUploadAckPayload>;
+/** `client.world_save_request` — module → relay, triggers Barn→Data persist pipeline (relay forwards to backend HTTP). */
+export type ClientWorldSaveRequestMessage = BaseMessage<"client.world_save_request", ClientWorldSaveRequestPayload>;
 /** `ping` — both directions, keep-alive probe. */
 export type PingMessage = BaseMessage<"ping", PingPayload>;
 /** `pong` — both directions, response to ping. */
@@ -633,6 +784,9 @@ export type ProtocolMessage =
   | BackendRollTableCreateMessage
   | BackendSceneCreateMessage
   | BackendTokenCreateMessage
+  | BackendDataUploadMessage
+  | ClientDataUploadAckMessage
+  | ClientWorldSaveRequestMessage
   | PingMessage
   | PongMessage
   | ErrorMessage;
@@ -851,6 +1005,39 @@ function validateQuerySnapshot(
   assert(isNonEmptyString(snap.sceneName), "snapshot.sceneName", "non-empty string", correlationId);
 }
 
+const VALID_WORLD_FILE_CATEGORIES = new Set<string>(WORLD_FILE_CATEGORIES);
+
+function validateWorldFiles(
+  value: unknown,
+  correlationId: string
+): asserts value is readonly ClientWorldFile[] {
+  assert(Array.isArray(value), "payload.worldFiles", "array", correlationId);
+  assert(
+    value.length <= 1000,
+    "payload.worldFiles.length",
+    "<= 1000 (module truncates beyond this)",
+    correlationId
+  );
+  for (let i = 0; i < value.length; i++) {
+    const f = value[i];
+    assert(isPlainObject(f), `worldFiles[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString(f.path), `worldFiles[${i}].path`, "non-empty string", correlationId);
+    assert(
+      typeof f.category === "string" && VALID_WORLD_FILE_CATEGORIES.has(f.category),
+      `worldFiles[${i}].category`,
+      "one of npcs|scenes|maps|items|journals|gm",
+      correlationId
+    );
+    assert(isNonEmptyString(f.slug), `worldFiles[${i}].slug`, "non-empty string", correlationId);
+    assert(
+      typeof f.sizeBytes === "number" && f.sizeBytes >= 0,
+      `worldFiles[${i}].sizeBytes`,
+      "non-negative number",
+      correlationId
+    );
+  }
+}
+
 function validateQueryPayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -860,6 +1047,9 @@ function validateQueryPayload(
   validateQueryContext(payload.context, correlationId);
   if (payload.snapshot !== undefined) {
     validateQuerySnapshot(payload.snapshot, correlationId);
+  }
+  if (payload.worldFiles !== undefined) {
+    validateWorldFiles(payload.worldFiles, correlationId);
   }
 }
 
@@ -1060,6 +1250,152 @@ function validateSessionEventPayload(
   }
 }
 
+// ── Data upload validators (Phase B.4) ────────────────────────────────
+
+/**
+ * Validate a follow-up command nested inside `backend.data.upload`.
+ * Dispatches to the same per-kind validators used at the envelope level
+ * so we can't construct an invalid follow-up.
+ */
+function validateFollowUpCommand(
+  value: unknown,
+  correlationId: string
+): asserts value is BackendFollowUpCommand {
+  assert(isPlainObject(value), "payload.followUp", "an object", correlationId);
+  const f = value;
+  assert(isNonEmptyString(f.kind), "followUp.kind", "non-empty string", correlationId);
+  assert(isPlainObject(f.payload), "followUp.payload", "an object", correlationId);
+  const fp = f.payload as Record<string, unknown>;
+  switch (f.kind) {
+    case "backend.chat.create":
+      validateChatCreatePayload(fp, correlationId);
+      break;
+    case "backend.actor.create":
+      validateActorCreatePayload(fp, correlationId);
+      break;
+    case "backend.actor.update":
+      validateActorUpdatePayload(fp, correlationId);
+      break;
+    case "backend.journal.create":
+      validateJournalCreatePayload(fp, correlationId);
+      break;
+    case "backend.rolltable.create":
+      validateRollTableCreatePayload(fp, correlationId);
+      break;
+    case "backend.scene.create":
+      validateSceneCreatePayload(fp, correlationId);
+      break;
+    case "backend.token.create":
+      validateTokenCreatePayload(fp, correlationId);
+      break;
+    default:
+      throw new ProtocolError(
+        "validation_failed",
+        `followUp.kind: invalid backend command (got ${String(f.kind)})`,
+        correlationId
+      );
+  }
+}
+
+function validateDataUploadPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isNonEmptyString(payload.signedUrl), "payload.signedUrl", "non-empty string", correlationId);
+  assert(
+    typeof payload.signedUrl === "string" && /^https?:\/\//.test(payload.signedUrl),
+    "payload.signedUrl",
+    "http(s) URL",
+    correlationId
+  );
+  assert(isNonEmptyString(payload.targetPath), "payload.targetPath", "non-empty string", correlationId);
+  assert(
+    typeof payload.targetPath === "string" && payload.targetPath.startsWith("worlds/"),
+    "payload.targetPath",
+    "starts with 'worlds/' (per §4 path convention)",
+    correlationId
+  );
+  if (payload.followUp !== undefined) {
+    validateFollowUpCommand(payload.followUp, correlationId);
+  }
+}
+
+const SLUG_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const VALID_TARGET_TYPES = new Set<string>(["actor", "scene", "token", "journal", "save_only"]);
+const VALID_TARGET_ACTIONS = new Set<string>(["create", "update"]);
+
+function validateWorldSaveRequestPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  if ("correlationId" in payload && payload.correlationId !== undefined) {
+    assert(
+      typeof payload.correlationId === "string",
+      "payload.correlationId",
+      "string when present",
+      correlationId
+    );
+  }
+  assert(isNonEmptyString(payload.sessionId), "payload.sessionId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.barnPath), "payload.barnPath", "non-empty string", correlationId);
+  assert(
+    typeof payload.barnPath === "string" && !payload.barnPath.includes("..") && !payload.barnPath.startsWith("/"),
+    "payload.barnPath",
+    "Barn-relative path (no leading / and no '..')",
+    correlationId
+  );
+  assert(
+    typeof payload.category === "string" && VALID_WORLD_FILE_CATEGORIES.has(payload.category),
+    "payload.category",
+    "one of npcs|scenes|maps|items|journals|gm",
+    correlationId
+  );
+  assert(
+    typeof payload.slug === "string" && SLUG_PATTERN.test(payload.slug),
+    "payload.slug",
+    "kebab-case string (lowercase, digits, hyphens only)",
+    correlationId
+  );
+  assert(
+    typeof payload.targetType === "string" && VALID_TARGET_TYPES.has(payload.targetType),
+    "payload.targetType",
+    "one of actor|scene|token|journal|save_only",
+    correlationId
+  );
+  assert(
+    typeof payload.targetAction === "string" && VALID_TARGET_ACTIONS.has(payload.targetAction),
+    "payload.targetAction",
+    "one of create|update",
+    correlationId
+  );
+  if ("params" in payload && payload.params !== undefined) {
+    assert(isPlainObject(payload.params), "payload.params", "an object when present", correlationId);
+  }
+}
+
+function validateDataUploadAckPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(isNonEmptyString(payload.targetPath), "payload.targetPath", "non-empty string", correlationId);
+  assert(typeof payload.ok === "boolean", "payload.ok", "boolean", correlationId);
+  if ("error" in payload && payload.error !== undefined) {
+    assert(typeof payload.error === "string", "payload.error", "string when present", correlationId);
+  }
+}
+
 function validatePongPayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -1134,6 +1470,15 @@ export function validateMessage(input: unknown): ProtocolMessage {
       break;
     case "backend.token.create":
       validateTokenCreatePayload(payload, id);
+      break;
+    case "backend.data.upload":
+      validateDataUploadPayload(payload, id);
+      break;
+    case "client.data_upload_ack":
+      validateDataUploadAckPayload(payload, id);
+      break;
+    case "client.world_save_request":
+      validateWorldSaveRequestPayload(payload, id);
       break;
     case "ping":
       // PingPayload is empty — no further validation needed.
