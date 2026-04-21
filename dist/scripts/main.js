@@ -97,10 +97,24 @@ function validateQueryContext(value, correlationId) {
   assert(typeof ctx.inCombat === "boolean", "context.inCombat", "boolean", correlationId);
   assert(isStringArray(ctx.recentChat), "context.recentChat", "string array", correlationId);
 }
+function validateQuerySnapshot(value, correlationId) {
+  assert(isPlainObject(value), "payload.snapshot", "an object", correlationId);
+  const snap = value;
+  assert(isNonEmptyString(snap.dataUrl), "snapshot.dataUrl", "non-empty string", correlationId);
+  assert(typeof snap.dataUrl === "string" && snap.dataUrl.startsWith("data:image/"), "snapshot.dataUrl", "data URL with image/ media type", correlationId);
+  assert(typeof snap.width === "number" && snap.width > 0, "snapshot.width", "positive number", correlationId);
+  assert(typeof snap.height === "number" && snap.height > 0, "snapshot.height", "positive number", correlationId);
+  assert(typeof snap.gridSize === "number" && snap.gridSize > 0, "snapshot.gridSize", "positive number", correlationId);
+  assert(isNonEmptyString(snap.sceneId), "snapshot.sceneId", "non-empty string", correlationId);
+  assert(isNonEmptyString(snap.sceneName), "snapshot.sceneName", "non-empty string", correlationId);
+}
 function validateQueryPayload(payload, correlationId) {
   assert(isNonEmptyString(payload.sessionId), "payload.sessionId", "non-empty string", correlationId);
   assert(isNonEmptyString(payload.query), "payload.query", "non-empty string", correlationId);
   validateQueryContext(payload.context, correlationId);
+  if (payload.snapshot !== void 0) {
+    validateQuerySnapshot(payload.snapshot, correlationId);
+  }
 }
 function validateChatCreatePayload(payload, correlationId) {
   assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
@@ -1279,6 +1293,93 @@ class RelayClient {
     this.pendingPingId = null;
   }
 }
+const MAX_DIM = 2048;
+const DEFAULT_QUALITY = 0.85;
+async function captureViewportSnapshot() {
+  const scene = canvas.scene;
+  if (!scene) {
+    debug("snapshot: no active scene — skipping capture");
+    return null;
+  }
+  const app = canvas.app;
+  if (!app || !app.renderer || typeof app.renderer.extract?.base64 !== "function") {
+    warn("snapshot: canvas.app.renderer.extract.base64 unavailable — skipping capture");
+    return null;
+  }
+  const target = canvas.stage ?? app.stage;
+  if (!target) {
+    warn("snapshot: canvas.stage unavailable — skipping capture");
+    return null;
+  }
+  try {
+    const started = Date.now();
+    let dataUrl = await app.renderer.extract.base64(target, "image/jpeg", DEFAULT_QUALITY);
+    const [viewW, viewH] = canvas.screenDimensions ?? [0, 0];
+    let width = viewW || scene.dimensions?.width || 0;
+    let height = viewH || scene.dimensions?.height || 0;
+    if (width > MAX_DIM || height > MAX_DIM) {
+      const downscaled = await downscaleDataUrl(dataUrl, MAX_DIM, DEFAULT_QUALITY);
+      if (downscaled) {
+        dataUrl = downscaled.dataUrl;
+        width = downscaled.width;
+        height = downscaled.height;
+      }
+    }
+    const durationMs = Date.now() - started;
+    const approxBytes = Math.floor(dataUrl.length * 3 / 4);
+    debug(`snapshot: captured scene="${scene.name}" ${width}x${height} (~${approxBytes}B, ${durationMs}ms)`);
+    return {
+      dataUrl,
+      width: width || MAX_DIM,
+      height: height || MAX_DIM,
+      gridSize: scene.grid.size,
+      sceneId: scene.id,
+      sceneName: scene.name
+    };
+  } catch (err) {
+    warn(`snapshot: extract.base64 failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+async function downscaleDataUrl(dataUrl, maxDim, quality) {
+  try {
+    const img = await loadImage(dataUrl);
+    const scale = Math.min(maxDim / img.width, maxDim / img.height, 1);
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
+    const canvasEl = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(w, h) : (() => {
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      return c;
+    })();
+    const ctx = canvasEl.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, w, h);
+    const out = canvasEl instanceof OffscreenCanvas ? await canvasEl.convertToBlob({ type: "image/jpeg", quality }) : await new Promise((resolve) => {
+      canvasEl.toBlob(resolve, "image/jpeg", quality);
+    });
+    if (!out) return null;
+    const reader = new FileReader();
+    const dataUrlOut = await new Promise((resolve, reject) => {
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(out);
+    });
+    return { dataUrl: dataUrlOut, width: w, height: h };
+  } catch (err) {
+    warn(`snapshot: downscale failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("image load failed"));
+    img.src = src;
+  });
+}
 const MODULE_ID$1 = "stablepiggy-napoleon-game-assistant";
 const RESPONSE_TIMEOUT_MS = 18e4;
 function registerChatCommand(client) {
@@ -1336,6 +1437,7 @@ async function handleNapoleonQuery(client, sessionId, query) {
     ui.notifications.error("Napoleon: failed to render placeholder message");
     return;
   }
+  const snapshot = await captureViewportSnapshot();
   const queryId = client.sendQuery({
     sessionId,
     query,
@@ -1347,7 +1449,8 @@ async function handleNapoleonQuery(client, sessionId, query) {
       selectedActorIds: [],
       inCombat: false,
       recentChat: []
-    }
+    },
+    ...snapshot ? { snapshot } : {}
   });
   if (queryId === null) {
     await safeUpdate(placeholder.id, {
