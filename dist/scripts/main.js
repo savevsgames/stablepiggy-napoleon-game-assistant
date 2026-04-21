@@ -9,6 +9,14 @@ class ProtocolError extends Error {
     this.correlationId = correlationId;
   }
 }
+const WORLD_FILE_CATEGORIES = [
+  "npcs",
+  "scenes",
+  "maps",
+  "items",
+  "journals",
+  "gm"
+];
 function makeMessageId() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   const bytes = new Uint8Array(16);
@@ -108,12 +116,28 @@ function validateQuerySnapshot(value, correlationId) {
   assert(isNonEmptyString(snap.sceneId), "snapshot.sceneId", "non-empty string", correlationId);
   assert(isNonEmptyString(snap.sceneName), "snapshot.sceneName", "non-empty string", correlationId);
 }
+const VALID_WORLD_FILE_CATEGORIES = new Set(WORLD_FILE_CATEGORIES);
+function validateWorldFiles(value, correlationId) {
+  assert(Array.isArray(value), "payload.worldFiles", "array", correlationId);
+  assert(value.length <= 1e3, "payload.worldFiles.length", "<= 1000 (module truncates beyond this)", correlationId);
+  for (let i = 0; i < value.length; i++) {
+    const f = value[i];
+    assert(isPlainObject(f), `worldFiles[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString(f.path), `worldFiles[${i}].path`, "non-empty string", correlationId);
+    assert(typeof f.category === "string" && VALID_WORLD_FILE_CATEGORIES.has(f.category), `worldFiles[${i}].category`, "one of npcs|scenes|maps|items|journals|gm", correlationId);
+    assert(isNonEmptyString(f.slug), `worldFiles[${i}].slug`, "non-empty string", correlationId);
+    assert(typeof f.sizeBytes === "number" && f.sizeBytes >= 0, `worldFiles[${i}].sizeBytes`, "non-negative number", correlationId);
+  }
+}
 function validateQueryPayload(payload, correlationId) {
   assert(isNonEmptyString(payload.sessionId), "payload.sessionId", "non-empty string", correlationId);
   assert(isNonEmptyString(payload.query), "payload.query", "non-empty string", correlationId);
   validateQueryContext(payload.context, correlationId);
   if (payload.snapshot !== void 0) {
     validateQuerySnapshot(payload.snapshot, correlationId);
+  }
+  if (payload.worldFiles !== void 0) {
+    validateWorldFiles(payload.worldFiles, correlationId);
   }
 }
 function validateChatCreatePayload(payload, correlationId) {
@@ -232,6 +256,74 @@ function validateSessionEventPayload(payload, correlationId) {
     assert(isFiniteNumber(meta.combatRound), "metadata.combatRound", "finite number when present", correlationId);
   }
 }
+function validateFollowUpCommand(value, correlationId) {
+  assert(isPlainObject(value), "payload.followUp", "an object", correlationId);
+  const f = value;
+  assert(isNonEmptyString(f.kind), "followUp.kind", "non-empty string", correlationId);
+  assert(isPlainObject(f.payload), "followUp.payload", "an object", correlationId);
+  const fp = f.payload;
+  switch (f.kind) {
+    case "backend.chat.create":
+      validateChatCreatePayload(fp, correlationId);
+      break;
+    case "backend.actor.create":
+      validateActorCreatePayload(fp, correlationId);
+      break;
+    case "backend.actor.update":
+      validateActorUpdatePayload(fp, correlationId);
+      break;
+    case "backend.journal.create":
+      validateJournalCreatePayload(fp, correlationId);
+      break;
+    case "backend.rolltable.create":
+      validateRollTableCreatePayload(fp, correlationId);
+      break;
+    case "backend.scene.create":
+      validateSceneCreatePayload(fp, correlationId);
+      break;
+    case "backend.token.create":
+      validateTokenCreatePayload(fp, correlationId);
+      break;
+    default:
+      throw new ProtocolError("validation_failed", `followUp.kind: invalid backend command (got ${String(f.kind)})`, correlationId);
+  }
+}
+function validateDataUploadPayload(payload, correlationId) {
+  assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
+  assert(isNonEmptyString(payload.signedUrl), "payload.signedUrl", "non-empty string", correlationId);
+  assert(typeof payload.signedUrl === "string" && /^https?:\/\//.test(payload.signedUrl), "payload.signedUrl", "http(s) URL", correlationId);
+  assert(isNonEmptyString(payload.targetPath), "payload.targetPath", "non-empty string", correlationId);
+  assert(typeof payload.targetPath === "string" && payload.targetPath.startsWith("worlds/"), "payload.targetPath", "starts with 'worlds/' (per §4 path convention)", correlationId);
+  if (payload.followUp !== void 0) {
+    validateFollowUpCommand(payload.followUp, correlationId);
+  }
+}
+const SLUG_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const VALID_TARGET_TYPES = /* @__PURE__ */ new Set(["actor", "scene", "token", "journal", "save_only"]);
+const VALID_TARGET_ACTIONS = /* @__PURE__ */ new Set(["create", "update"]);
+function validateWorldSaveRequestPayload(payload, correlationId) {
+  if ("correlationId" in payload && payload.correlationId !== void 0) {
+    assert(typeof payload.correlationId === "string", "payload.correlationId", "string when present", correlationId);
+  }
+  assert(isNonEmptyString(payload.sessionId), "payload.sessionId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.barnPath), "payload.barnPath", "non-empty string", correlationId);
+  assert(typeof payload.barnPath === "string" && !payload.barnPath.includes("..") && !payload.barnPath.startsWith("/"), "payload.barnPath", "Barn-relative path (no leading / and no '..')", correlationId);
+  assert(typeof payload.category === "string" && VALID_WORLD_FILE_CATEGORIES.has(payload.category), "payload.category", "one of npcs|scenes|maps|items|journals|gm", correlationId);
+  assert(typeof payload.slug === "string" && SLUG_PATTERN.test(payload.slug), "payload.slug", "kebab-case string (lowercase, digits, hyphens only)", correlationId);
+  assert(typeof payload.targetType === "string" && VALID_TARGET_TYPES.has(payload.targetType), "payload.targetType", "one of actor|scene|token|journal|save_only", correlationId);
+  assert(typeof payload.targetAction === "string" && VALID_TARGET_ACTIONS.has(payload.targetAction), "payload.targetAction", "one of create|update", correlationId);
+  if ("params" in payload && payload.params !== void 0) {
+    assert(isPlainObject(payload.params), "payload.params", "an object when present", correlationId);
+  }
+}
+function validateDataUploadAckPayload(payload, correlationId) {
+  assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
+  assert(isNonEmptyString(payload.targetPath), "payload.targetPath", "non-empty string", correlationId);
+  assert(typeof payload.ok === "boolean", "payload.ok", "boolean", correlationId);
+  if ("error" in payload && payload.error !== void 0) {
+    assert(typeof payload.error === "string", "payload.error", "string when present", correlationId);
+  }
+}
 function validatePongPayload(payload, correlationId) {
   assert(isNonEmptyString(payload.pingId), "payload.pingId", "non-empty string", correlationId);
 }
@@ -278,6 +370,15 @@ function validateMessage(input) {
       break;
     case "backend.token.create":
       validateTokenCreatePayload(payload, id);
+      break;
+    case "backend.data.upload":
+      validateDataUploadPayload(payload, id);
+      break;
+    case "client.data_upload_ack":
+      validateDataUploadAckPayload(payload, id);
+      break;
+    case "client.world_save_request":
+      validateWorldSaveRequestPayload(payload, id);
       break;
     case "ping":
       break;
@@ -347,6 +448,133 @@ function getRelayEndpoint() {
 function getAuthToken() {
   const raw = game.settings.get(MODULE_ID$2, SETTING_AUTH_TOKEN);
   return typeof raw === "string" ? raw : "";
+}
+const MAX_WORLD_FILES = 1e3;
+function napoleonRoot(worldId) {
+  return `worlds/${worldId}/napoleon`;
+}
+async function listWorldFiles(worldId) {
+  const root = napoleonRoot(worldId);
+  const collected = [];
+  let rootResult;
+  try {
+    rootResult = await FilePicker.browse("data", root);
+  } catch (err) {
+    debug(`listWorldFiles: no napoleon/ tree yet for world "${worldId}" (${err instanceof Error ? err.message : err})`);
+    return [];
+  }
+  const knownCategories = new Set(WORLD_FILE_CATEGORIES);
+  for (const dirPath of rootResult.dirs) {
+    const category = dirPath.split("/").pop() ?? "";
+    if (!knownCategories.has(category)) {
+      debug(`listWorldFiles: skipping unknown category dir "${dirPath}"`);
+      continue;
+    }
+    let dirResult;
+    try {
+      dirResult = await FilePicker.browse("data", dirPath);
+    } catch (err) {
+      warn(`listWorldFiles: FilePicker.browse failed on ${dirPath}: ${err instanceof Error ? err.message : err}`);
+      continue;
+    }
+    for (const filePath of dirResult.files) {
+      if (collected.length >= MAX_WORLD_FILES) {
+        warn(`listWorldFiles: hit ${MAX_WORLD_FILES}-file cap, truncating`);
+        return collected;
+      }
+      const slug = slugFromPath(filePath);
+      if (!slug) continue;
+      collected.push({
+        path: filePath,
+        category,
+        slug,
+        // FilePicker doesn't expose sizeBytes — report 0; sorting/dedup
+        // logic on the backend doesn't depend on it.
+        sizeBytes: 0
+      });
+    }
+  }
+  debug(`listWorldFiles: ${collected.length} file(s) under ${root}`);
+  return collected;
+}
+function slugFromPath(path) {
+  const basename2 = path.split("/").pop() ?? "";
+  const dotIdx = basename2.lastIndexOf(".");
+  if (dotIdx <= 0) return basename2;
+  return basename2.slice(0, dotIdx);
+}
+async function uploadToWorld(signedUrl, targetPath) {
+  const dir = dirname(targetPath);
+  const filename = basename(targetPath);
+  if (!filename || !dir) {
+    throw new Error(`invalid targetPath "${targetPath}"`);
+  }
+  await ensureDir(dir);
+  let replacing = false;
+  try {
+    const existing = await FilePicker.browse("data", dir);
+    if (existing.files.includes(targetPath)) {
+      replacing = true;
+    }
+  } catch {
+  }
+  if (replacing) {
+    ui.notifications.info(`Replacing existing ${filename}`, { permanent: false });
+  }
+  let blob;
+  try {
+    const response = await fetch(signedUrl);
+    if (!response.ok) {
+      const status = response.status;
+      if (status === 403) {
+        throw new Error(`signed URL expired or invalid (HTTP 403)`);
+      }
+      throw new Error(`fetch failed with HTTP ${status}`);
+    }
+    blob = await response.blob();
+  } catch (err) {
+    throw new Error(
+      err instanceof Error && err.message.startsWith("signed URL") ? err.message : `fetch from Barn failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  const file = new File([blob], filename, { type: blob.type || "image/png" });
+  try {
+    await FilePicker.upload("data", dir, file, {}, { notify: false });
+  } catch (err) {
+    throw new Error(
+      `FilePicker.upload failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  debug(`uploadToWorld: uploaded ${filename} to ${dir} (${blob.size} bytes)${replacing ? " [replaced]" : ""}`);
+}
+async function ensureDir(dirPath) {
+  if (!FilePicker.createDirectory) {
+    debug(`ensureDir: FilePicker.createDirectory unavailable, skipping`);
+    return;
+  }
+  const segments = dirPath.split("/");
+  for (let i = 1; i <= segments.length; i++) {
+    const step = segments.slice(0, i).join("/");
+    if (!step) continue;
+    try {
+      await FilePicker.createDirectory("data", step);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/exists/i.test(msg)) {
+        throw new Error(`createDirectory failed at "${step}": ${msg}`);
+      }
+    }
+  }
+}
+function dirname(path) {
+  const idx = path.lastIndexOf("/");
+  if (idx < 0) return "";
+  return path.slice(0, idx);
+}
+function basename(path) {
+  const idx = path.lastIndexOf("/");
+  if (idx < 0) return path;
+  return path.slice(idx + 1);
 }
 function escapeHtml$1(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -464,6 +692,27 @@ class RelayClient {
     return msg.id;
   }
   /**
+   * Send a `client.world_save_request` to the relay. The relay forwards
+   * to the backend's /world-save endpoint, receives a list of commands
+   * (typically a single backend.data.upload with an optional follow-up),
+   * and pushes them back over the WebSocket. From this caller's
+   * perspective: send-and-forget; the normal handler dispatch picks up
+   * the inbound commands.
+   *
+   * Returns the message id on success, null if not connected.
+   */
+  sendWorldSaveRequest(payload) {
+    if (this.status !== "connected" || !this.socket) {
+      warn(`sendWorldSaveRequest called while status=${this.status} — dropping`);
+      return null;
+    }
+    const sessionId = payload.sessionId ?? `napoleon-${this.ctx.worldId}-${this.ctx.gmUserId}`;
+    const msg = makeMessage("client.world_save_request", { ...payload, sessionId });
+    this.socket.send(JSON.stringify(msg));
+    debug(`→ client.world_save_request (slug=${payload.slug}, target=${payload.targetType})`);
+    return msg.id;
+  }
+  /**
    * Send a `client.session_event` to the relay. Fire-and-forget — session
    * events are buffered relay-side and flushed in batches. Returns the
    * message id on success, null if not connected.
@@ -571,6 +820,9 @@ class RelayClient {
       case "backend.token.create":
         void this.handleTokenCreate(message.payload);
         break;
+      case "backend.data.upload":
+        void this.handleDataUpload(message.payload, message.id);
+        break;
       case "error":
         warn(
           `relay sent error (code=${message.payload.code}): ${message.payload.message}`
@@ -585,6 +837,8 @@ class RelayClient {
       case "client.hello":
       case "client.query":
       case "client.session_event":
+      case "client.data_upload_ack":
+      case "client.world_save_request":
         warn(
           `received ${message.kind} from relay — this kind is client→relay only`
         );
@@ -1249,6 +1503,86 @@ class RelayClient {
       error(`Token placement threw for "${actorName}": ${msg}`, err);
     }
   }
+  /**
+   * Handle a `backend.data.upload` payload: fetch the signed Barn URL,
+   * upload the bytes to Foundry Data at `targetPath` via FilePicker,
+   * then (if `followUp` is present) dispatch it through the normal
+   * handler for that kind. Emits `client.data_upload_ack` with the
+   * outcome for backend observability. On failure, surfaces the error
+   * via ui.notifications.error — the chat preview button remains
+   * clickable so the GM can retry.
+   *
+   * Fail loud per RFC Q4 — no automatic retry, GM decides.
+   */
+  async handleDataUpload(payload, originatingMessageId) {
+    const { signedUrl, targetPath, followUp, correlationId } = payload;
+    try {
+      await uploadToWorld(signedUrl, targetPath);
+      info(`handleDataUpload: uploaded to ${targetPath}`);
+      this.sendDataUploadAck({
+        correlationId,
+        targetPath,
+        ok: true
+      });
+      if (followUp) {
+        switch (followUp.kind) {
+          case "backend.chat.create":
+            await this.handleChatCreate(followUp.payload);
+            break;
+          case "backend.actor.create":
+            await this.handleActorCreate(followUp.payload);
+            break;
+          case "backend.actor.update":
+            await this.handleActorUpdate(followUp.payload);
+            break;
+          case "backend.journal.create":
+            await this.handleJournalCreate(followUp.payload);
+            break;
+          case "backend.rolltable.create":
+            await this.handleRollTableCreate(followUp.payload);
+            break;
+          case "backend.scene.create":
+            await this.handleSceneCreate(followUp.payload);
+            break;
+          case "backend.token.create":
+            await this.handleTokenCreate(followUp.payload);
+            break;
+          default: {
+            const exhaustive = followUp;
+            void exhaustive;
+          }
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error(
+        `handleDataUpload failed for ${targetPath} (msgId=${originatingMessageId}): ${msg}`,
+        err
+      );
+      try {
+        globalThis.ui?.notifications?.error(`Save to World failed: ${msg}`);
+      } catch {
+      }
+      this.sendDataUploadAck({
+        correlationId,
+        targetPath,
+        ok: false,
+        error: msg
+      });
+    }
+  }
+  /**
+   * Emit a `client.data_upload_ack` over the socket. Fire-and-forget
+   * telemetry — backend logs it but doesn't branch on the outcome.
+   */
+  sendDataUploadAck(payload) {
+    if (this.status !== "connected" || !this.socket) {
+      debug(`sendDataUploadAck skipped (status=${this.status}) for ${payload.targetPath}`);
+      return;
+    }
+    const msg = makeMessage("client.data_upload_ack", payload);
+    this.socket.send(JSON.stringify(msg));
+  }
   // ── Timers ──────────────────────────────────────────────────────────
   startPingLoop() {
     if (this.pingTimer) return;
@@ -1438,6 +1772,7 @@ async function handleNapoleonQuery(client, sessionId, query) {
     return;
   }
   const snapshot = await captureViewportSnapshot();
+  const worldFiles = await listWorldFiles(game.world.id);
   const queryId = client.sendQuery({
     sessionId,
     query,
@@ -1450,7 +1785,8 @@ async function handleNapoleonQuery(client, sessionId, query) {
       inCombat: false,
       recentChat: []
     },
-    ...snapshot ? { snapshot } : {}
+    ...snapshot ? { snapshot } : {},
+    ...worldFiles.length > 0 ? { worldFiles } : {}
   });
   if (queryId === null) {
     await safeUpdate(placeholder.id, {
@@ -1510,8 +1846,11 @@ function escapeHtml(s) {
 }
 const SEND_ATTR = "data-napoleon-send";
 const PREFILL_ATTR = "data-napoleon-prefill";
+const WORLD_SAVE_ATTR = "data-napoleon-world-save";
 const WIRED_FLAG = "napoleonWired";
-function registerChatButtonHandlers(_client) {
+let relayClientRef = null;
+function registerChatButtonHandlers(client) {
+  relayClientRef = client;
   Hooks.on("renderChatMessageHTML", (_msg, html) => {
     const el = html;
     if (!el || typeof el.querySelectorAll !== "function") return;
@@ -1521,7 +1860,7 @@ function registerChatButtonHandlers(_client) {
 }
 function wireButtons(root) {
   const buttons = root.querySelectorAll(
-    `[${SEND_ATTR}], [${PREFILL_ATTR}]`
+    `[${SEND_ATTR}], [${PREFILL_ATTR}], [${WORLD_SAVE_ATTR}]`
   );
   if (buttons.length === 0) return;
   buttons.forEach((btn) => {
@@ -1552,6 +1891,10 @@ async function handleClick(btn) {
     }
     return;
   }
+  if (btn.hasAttribute(WORLD_SAVE_ATTR)) {
+    await handleWorldSaveClick(btn);
+    return;
+  }
   const prefill = btn.getAttribute(PREFILL_ATTR);
   if (prefill !== null && prefill.length > 0) {
     debug(`napoleon-prefill click → populating chat input`);
@@ -1568,6 +1911,65 @@ async function handleClick(btn) {
       const len = input.value.length;
       input.setSelectionRange(len, len);
     }
+  }
+}
+async function handleWorldSaveClick(btn) {
+  if (!relayClientRef) {
+    error("napoleon-world-save click but relayClientRef is unset");
+    ui.notifications.error("Save to World: module not fully initialized yet. Try again.");
+    return;
+  }
+  const barnPath = btn.getAttribute("data-barn-path");
+  const category = btn.getAttribute("data-category");
+  const slug = btn.getAttribute("data-slug");
+  const targetType = btn.getAttribute("data-target-type");
+  const targetAction = btn.getAttribute("data-target-action");
+  const paramsRaw = btn.getAttribute("data-params");
+  if (!barnPath || !category || !slug || !targetType || !targetAction) {
+    error(
+      `napoleon-world-save click missing required data-* attrs (barn=${barnPath}, category=${category}, slug=${slug}, targetType=${targetType}, targetAction=${targetAction})`
+    );
+    ui.notifications.error("Save to World: button is malformed (missing data attributes).");
+    return;
+  }
+  let params = {};
+  if (paramsRaw && paramsRaw.length > 0) {
+    try {
+      const parsed = JSON.parse(paramsRaw);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        params = parsed;
+      } else {
+        warn(`napoleon-world-save: data-params parsed to non-object, ignoring`);
+      }
+    } catch (err) {
+      error(
+        `napoleon-world-save: data-params is not valid JSON: ${err instanceof Error ? err.message : String(err)}`
+      );
+      ui.notifications.error("Save to World: button has invalid params JSON.");
+      return;
+    }
+  }
+  const buttonEl = btn;
+  const originalText = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = "Saving…";
+  setTimeout(() => {
+    buttonEl.disabled = false;
+    buttonEl.textContent = originalText;
+  }, 2e3);
+  debug(
+    `napoleon-world-save click → category=${category}, slug=${slug}, targetType=${targetType}, targetAction=${targetAction}`
+  );
+  const msgId = relayClientRef.sendWorldSaveRequest({
+    barnPath,
+    category,
+    slug,
+    targetType,
+    targetAction,
+    params
+  });
+  if (msgId === null) {
+    ui.notifications.error("Save to World: relay is not connected.");
   }
 }
 const NAPOLEON_ALIASES = /* @__PURE__ */ new Set(["napoleon", "napoleon (m2 stub)"]);
@@ -1659,7 +2061,7 @@ Hooks.once("ready", () => {
   relayClient = new RelayClient(ctx);
   relayClient.connect();
   registerChatCommand(relayClient);
-  registerChatButtonHandlers();
+  registerChatButtonHandlers(relayClient);
   registerSessionCapture(relayClient);
 });
 Hooks.on("closeGame", () => {
