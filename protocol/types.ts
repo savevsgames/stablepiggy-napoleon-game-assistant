@@ -271,6 +271,36 @@ export interface QueryContext {
 }
 
 /**
+ * Optional canvas snapshot attached to a `client.query`. The module captures
+ * the current viewport of `canvas.stage` when a scene is active and the
+ * backend's current model supports image input. Backend-side gating (via
+ * `providers.config.ts::modelFlags.supportsImageInput`) discards the
+ * snapshot if the active model can't consume it — the module currently
+ * sends optimistically.
+ *
+ * The capture is the GM's current viewport, NOT the full scene — if the
+ * GM has panned to a corner, that's what the LLM sees. Reset pan/zoom
+ * before querying for full-scene context.
+ *
+ * Stored by the backend via `captures.ts` with `provenance='user_captured'`,
+ * `share_scope='org'` by default (party visibility for tactical snapshots).
+ * 5-min signed URL TTL.
+ */
+export interface ClientQuerySnapshot {
+  /** Full data URL: `data:image/jpeg;base64,...`. JPEG default for size, PNG available. */
+  readonly dataUrl: string;
+  /** Pixel dimensions of the captured viewport. */
+  readonly width: number;
+  readonly height: number;
+  /** Scene's grid cell size in pixels. Lets the backend map px → grid for placement. */
+  readonly gridSize: number;
+  /** The scene the snapshot was taken from. */
+  readonly sceneId: string;
+  /** GM-friendly scene name for log + cache key context. */
+  readonly sceneName: string;
+}
+
+/**
  * Payload for `client.query`. The module sends this when the GM types
  * `/napoleon <query>` in Foundry chat. The relay forwards it to the AI
  * backend, which responds with zero or more `backend.*` command messages.
@@ -287,6 +317,13 @@ export interface ClientQueryPayload {
   readonly query: string;
   /** Optional structured Foundry state at query time. */
   readonly context: QueryContext;
+  /**
+   * Optional viewport snapshot for vision-capable LLMs. Included when
+   * `canvas.scene` is active AND the module has reason to believe the
+   * active model can consume images. Backend discards silently if the
+   * resolved model does not support image input.
+   */
+  readonly snapshot?: ClientQuerySnapshot;
 }
 
 /**
@@ -794,6 +831,26 @@ function validateQueryContext(
   assert(isStringArray(ctx.recentChat), "context.recentChat", "string array", correlationId);
 }
 
+function validateQuerySnapshot(
+  value: unknown,
+  correlationId: string
+): asserts value is ClientQuerySnapshot {
+  assert(isPlainObject(value), "payload.snapshot", "an object", correlationId);
+  const snap = value;
+  assert(isNonEmptyString(snap.dataUrl), "snapshot.dataUrl", "non-empty string", correlationId);
+  assert(
+    typeof snap.dataUrl === "string" && snap.dataUrl.startsWith("data:image/"),
+    "snapshot.dataUrl",
+    "data URL with image/ media type",
+    correlationId
+  );
+  assert(typeof snap.width === "number" && snap.width > 0, "snapshot.width", "positive number", correlationId);
+  assert(typeof snap.height === "number" && snap.height > 0, "snapshot.height", "positive number", correlationId);
+  assert(typeof snap.gridSize === "number" && snap.gridSize > 0, "snapshot.gridSize", "positive number", correlationId);
+  assert(isNonEmptyString(snap.sceneId), "snapshot.sceneId", "non-empty string", correlationId);
+  assert(isNonEmptyString(snap.sceneName), "snapshot.sceneName", "non-empty string", correlationId);
+}
+
 function validateQueryPayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -801,6 +858,9 @@ function validateQueryPayload(
   assert(isNonEmptyString(payload.sessionId), "payload.sessionId", "non-empty string", correlationId);
   assert(isNonEmptyString(payload.query), "payload.query", "non-empty string", correlationId);
   validateQueryContext(payload.context, correlationId);
+  if (payload.snapshot !== undefined) {
+    validateQuerySnapshot(payload.snapshot, correlationId);
+  }
 }
 
 function validateChatCreatePayload(

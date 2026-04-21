@@ -84,6 +84,7 @@
 
 import type { RelayClient } from "./relay-client.js";
 import { info, warn, error as logError, debug } from "./log.js";
+import { captureViewportSnapshot } from "./snapshot.js";
 
 const MODULE_ID = "stablepiggy-napoleon-game-assistant";
 
@@ -278,6 +279,13 @@ async function handleNapoleonQuery(
     return;
   }
 
+  // Phase B.3: optionally capture the viewport as a JPEG for vision-capable
+  // LLMs. Best-effort — returns null when no scene is active or PIXI extract
+  // fails. The backend does server-side gating on the active model's
+  // supportsImageInput flag and silently discards for non-vision models,
+  // so the module sends optimistically when a scene is available.
+  const snapshot = await captureViewportSnapshot();
+
   // Send the query. This returns the message id that the backend will
   // echo back as `correlationId` on the response — which is what we
   // key the placeholder replacement on.
@@ -293,6 +301,7 @@ async function handleNapoleonQuery(
       inCombat: false,
       recentChat: [],
     },
+    ...(snapshot ? { snapshot } : {}),
   });
 
   if (queryId === null) {
