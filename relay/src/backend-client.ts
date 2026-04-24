@@ -79,14 +79,15 @@ export interface BackendResponse {
     durationMs: number;
     correlationId?: string;
     /**
-     * V2 Phase 3 auto-continuation. When true, the backend's execution
-     * loop hit its per-query turn/token/timeout cap while the LLM was
-     * still calling tools — relay should fire a continuation query
-     * (up to MAX_CONTINUATIONS) so compound workflows finish across
-     * multiple HTTP queries. Absent/false on legacy responses; relay
-     * treats undefined as "no continuation" (old behavior).
+     * V2 Phase 3 task decomposition. Present when the backend's
+     * classifier decomposed a compound request into an ordered list
+     * of atomic sub-tasks. Relay iterates this queue: fire task[0] as
+     * a fresh /napoleon query, shift the queue, repeat. Each task is
+     * its own classifier + exec-loop pass with its own summary chat.
+     * Absent / empty = no more tasks, relay stops. Hard-capped at
+     * MAX_TASKS entries by the backend.
      */
-    continuationPending?: boolean;
+    taskQueue?: readonly string[];
   };
 }
 

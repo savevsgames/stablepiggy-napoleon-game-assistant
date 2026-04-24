@@ -477,45 +477,40 @@ async function handleQuery(
 
     let totalCommandCount = response.commands.length;
 
-    // V2 Phase 3 auto-continuation: when the backend's execution loop
-    // exited with work still pending (turn/token/time cap hit, LLM was
-    // still calling tools), auto-fire a continuation query so compound
-    // workflows (dungeon builds with walls + lights + doors) finish
-    // across multiple HTTP queries. User perceives "batch lands → pause
-    // → next batch lands" instead of one big wait + burst.
-    //
-    // Cap prevents runaway loops: MAX_CONTINUATIONS × backend's per-
-    // query MAX_LOOP_TURNS (3) bounds total LLM turns per original
-    // user query at 18. The backend short-circuits continuationPending
-    // on LLM errors, so a broken provider doesn't retry-spam us.
-    const MAX_CONTINUATIONS = 5;
-    const CONTINUATION_PAUSE_MS = 1000;
-    let continuationCount = 0;
+    // V2 Phase 3 task decomposition: when the backend classifier
+    // decomposed a compound request, response.meta.taskQueue lists
+    // the atomic sub-tasks to execute one at a time. Relay fires each
+    // as its own fresh /napoleon query — each task gets its own
+    // classifier + exec-loop pass + summary chat.create. User sees:
+    //   "Here's the plan" → task 1 result → task 2 result → ...
+    // One mechanism, one queue. If a single task doesn't fit in the
+    // backend's exec-loop budget, the classifier needs finer
+    // decomposition (add to the breakdown) rather than a fallback
+    // continuation system.
+    const MAX_TASKS = 8;  // matches the backend's request_task_breakdown cap
+    const TASK_PAUSE_MS = 1000;
+    let taskIndex = 0;
+    let taskQueue: readonly string[] = response.meta.taskQueue ?? [];
 
-    while (
-      response.meta.continuationPending === true &&
-      continuationCount < MAX_CONTINUATIONS
-    ) {
-      continuationCount++;
+    while (taskIndex < taskQueue.length && taskIndex < MAX_TASKS) {
+      const nextTaskText = taskQueue[taskIndex];
+      taskIndex++;
       log.info(
         {
           queryId: message.id,
-          continuationCount,
-          max: MAX_CONTINUATIONS,
+          taskIndex,
+          totalTasks: taskQueue.length,
           priorCommands: totalCommandCount,
+          task: nextTaskText.slice(0, 80),
         },
-        "auto-continuation firing"
+        "task-queue firing"
       );
-      await new Promise((r) => setTimeout(r, CONTINUATION_PAUSE_MS));
+      await new Promise((r) => setTimeout(r, TASK_PAUSE_MS));
 
       try {
         response = await forwardQueryToBackend(
           state,
-          {
-            ...message.payload,
-            query:
-              "Continue the previous task — pick up exactly where you left off. Keep emitting the remaining walls, lights, scene updates, tokens, or other tools the GM originally asked for. When fully done, respond with a plain-text summary and stop (do not call any more tools).",
-          },
+          { ...message.payload, query: nextTaskText },
           message.id,
           config,
           log
@@ -523,8 +518,8 @@ async function handleQuery(
       } catch (err) {
         const msg = err instanceof Error ? err.message : "unknown backend error";
         log.warn(
-          { err: msg, queryId: message.id, continuationCount },
-          "auto-continuation failed — stopping chain"
+          { err: msg, queryId: message.id, taskIndex, task: nextTaskText.slice(0, 80) },
+          "task-queue query failed — stopping chain"
         );
         break;
       }
@@ -534,15 +529,16 @@ async function handleQuery(
         sendMessage(state, wrapped);
       }
       totalCommandCount += response.commands.length;
+
+      // The backend does NOT emit a nested taskQueue from a sub-task
+      // execution (the classifier only fires request_task_breakdown at
+      // the top level on compound user requests). Ignore if present.
     }
 
-    if (
-      response.meta.continuationPending === true &&
-      continuationCount >= MAX_CONTINUATIONS
-    ) {
+    if (taskIndex >= MAX_TASKS && taskIndex < taskQueue.length) {
       log.warn(
-        { queryId: message.id, continuationCount, totalCommandCount },
-        "auto-continuation cap reached — stopping chain with work still pending"
+        { queryId: message.id, taskIndex, totalTasks: taskQueue.length, totalCommandCount },
+        "task-queue cap reached — remaining tasks dropped"
       );
     }
 
@@ -550,7 +546,7 @@ async function handleQuery(
       {
         queryId: message.id,
         commandCount: totalCommandCount,
-        continuationCount,
+        tasksExecuted: taskIndex,
         lastDurationMs: response.meta.durationMs,
         model: response.meta.modelUsed,
         tokens: response.meta.tokensUsed,
