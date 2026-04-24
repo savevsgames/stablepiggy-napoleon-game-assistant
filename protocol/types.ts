@@ -272,6 +272,14 @@ export interface RelayWelcomePayload {
 export interface QueryContext {
   /** Currently-active scene ID in Foundry, or null if none. */
   readonly sceneId: string | null;
+  /**
+   * Currently-active scene name in Foundry (V2 Phase 3 addition). When
+   * present, the backend injects it into the composed user message so
+   * Napoleon knows which scene the GM is looking at — required for
+   * scene-modification intents ("add walls here") to target the right
+   * scene instead of the last one Napoleon remembers.
+   */
+  readonly sceneName?: string | null;
   /** IDs of actors currently selected by the GM. */
   readonly selectedActorIds: readonly string[];
   /** Whether the combat tracker is open and in an active combat. */
@@ -1104,6 +1112,16 @@ function validateQueryContext(
     "string or null",
     correlationId
   );
+  // sceneName is optional — older modules don't include it. Accept any
+  // string or null when present; reject other types.
+  if ("sceneName" in ctx && ctx.sceneName !== undefined) {
+    assert(
+      ctx.sceneName === null || typeof ctx.sceneName === "string",
+      "context.sceneName",
+      "string or null when present",
+      correlationId
+    );
+  }
   assert(isStringArray(ctx.selectedActorIds), "context.selectedActorIds", "string array", correlationId);
   assert(typeof ctx.inCombat === "boolean", "context.inCombat", "boolean", correlationId);
   assert(isStringArray(ctx.recentChat), "context.recentChat", "string array", correlationId);

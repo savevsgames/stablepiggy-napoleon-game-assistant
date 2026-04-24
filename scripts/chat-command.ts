@@ -150,6 +150,9 @@ declare const game: {
     readonly isGM: boolean;
   };
   world: { readonly id: string };
+  scenes: {
+    readonly current?: { readonly id: string; readonly name?: string } | null;
+  };
 };
 
 /**
@@ -295,14 +298,19 @@ async function handleNapoleonQuery(
   // Send the query. This returns the message id that the backend will
   // echo back as `correlationId` on the response — which is what we
   // key the placeholder replacement on.
+  // V2 Phase 3: include the currently-active scene id + name so the
+  // backend knows which scene the GM is looking at. Without this,
+  // Napoleon guesses from session memory and often names a stale scene
+  // (see the "Abomination Vaults Shoreline Ambush" regression in the
+  // Otari smoke test). Falls back to null on both when no scene is
+  // active — backend treats null as "no active-scene context".
+  const activeScene = game.scenes.current ?? null;
   const queryId = client.sendQuery({
     sessionId,
     query,
     context: {
-      // Tier 1 leaves these empty. M5 could plumb through game.scenes
-      // .current?.id and selected actors, but the plan doesn't require
-      // it and the backend stub doesn't use them yet.
-      sceneId: null,
+      sceneId: activeScene?.id ?? null,
+      sceneName: activeScene?.name ?? null,
       selectedActorIds: [],
       inCombat: false,
       recentChat: [],
