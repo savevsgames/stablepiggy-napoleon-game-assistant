@@ -216,6 +216,76 @@ function validateSceneCreatePayload(payload, correlationId) {
     assert(typeof payload.openAfterCreate === "boolean", "payload.openAfterCreate", "boolean when present", correlationId);
   }
 }
+function validateWallCreatePayload(payload, correlationId) {
+  assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
+  assert(Array.isArray(payload.c), "payload.c", "array of 4 numbers", correlationId);
+  const c = payload.c;
+  assert(c.length === 4, "payload.c", "array of exactly 4 numbers", correlationId);
+  for (let i = 0; i < 4; i++) {
+    assert(typeof c[i] === "number" && Number.isFinite(c[i]), `payload.c[${i}]`, "finite number", correlationId);
+  }
+  for (const flag of ["move", "sense", "sound", "door"]) {
+    assert(typeof payload[flag] === "number" && Number.isInteger(payload[flag]) && payload[flag] >= 0, `payload.${flag}`, "non-negative integer", correlationId);
+  }
+  assert(payload.move <= 1, "payload.move", "0 or 1", correlationId);
+  assert(payload.sense <= 1, "payload.sense", "0 or 1", correlationId);
+  assert(payload.sound <= 1, "payload.sound", "0 or 1", correlationId);
+  assert(payload.door <= 2, "payload.door", "0, 1, or 2", correlationId);
+  if ("sceneName" in payload) {
+    assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
+  }
+}
+function validateLightCreatePayload(payload, correlationId) {
+  assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
+  for (const field of ["x", "y", "dim", "bright"]) {
+    assert(typeof payload[field] === "number" && Number.isFinite(payload[field]), `payload.${field}`, "finite number", correlationId);
+  }
+  assert(payload.dim >= 0, "payload.dim", "non-negative", correlationId);
+  assert(payload.bright >= 0, "payload.bright", "non-negative", correlationId);
+  assert(payload.bright <= payload.dim, "payload.bright", "<= payload.dim (bright is the inner fully-lit radius, dim is the outer dim-light radius)", correlationId);
+  if ("angle" in payload) {
+    assert(typeof payload.angle === "number" && Number.isFinite(payload.angle) && payload.angle >= 0 && payload.angle <= 360, "payload.angle", "number in [0, 360]", correlationId);
+  }
+  if ("rotation" in payload) {
+    assert(typeof payload.rotation === "number" && Number.isFinite(payload.rotation), "payload.rotation", "finite number", correlationId);
+  }
+  if ("color" in payload) {
+    assert(payload.color === null || typeof payload.color === "string", "payload.color", "string or null when present", correlationId);
+  }
+  if ("sceneName" in payload) {
+    assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
+  }
+}
+function validateSceneUpdatePayload(payload, correlationId) {
+  assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
+  if ("sceneName" in payload) {
+    assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
+  }
+  if ("globalLight" in payload) {
+    assert(typeof payload.globalLight === "boolean", "payload.globalLight", "boolean when present", correlationId);
+  }
+  if ("darkness" in payload) {
+    assert(typeof payload.darkness === "number" && Number.isFinite(payload.darkness) && payload.darkness >= 0 && payload.darkness <= 1, "payload.darkness", "number in [0, 1]", correlationId);
+  }
+  if ("tokenVision" in payload) {
+    assert(typeof payload.tokenVision === "boolean", "payload.tokenVision", "boolean when present", correlationId);
+  }
+  if ("gridSize" in payload) {
+    assert(typeof payload.gridSize === "number" && payload.gridSize > 0, "payload.gridSize", "positive number when present", correlationId);
+  }
+  if ("gridDistance" in payload) {
+    assert(typeof payload.gridDistance === "number" && payload.gridDistance > 0, "payload.gridDistance", "positive number when present", correlationId);
+  }
+  if ("gridUnits" in payload) {
+    assert(typeof payload.gridUnits === "string", "payload.gridUnits", "string when present", correlationId);
+  }
+  if ("navigation" in payload) {
+    assert(typeof payload.navigation === "boolean", "payload.navigation", "boolean when present", correlationId);
+  }
+  const updateKeys = ["globalLight", "darkness", "tokenVision", "gridSize", "gridDistance", "gridUnits", "navigation"];
+  const hasUpdate = updateKeys.some((k) => k in payload);
+  assert(hasUpdate, "payload", `one of [${updateKeys.join(", ")}] to be present`, correlationId);
+}
 function validateJournalCreatePayload(payload, correlationId) {
   assert(payload.correlationId === null || typeof payload.correlationId === "string", "payload.correlationId", "string or null", correlationId);
   assert(isNonEmptyString(payload.name), "payload.name", "non-empty string", correlationId);
@@ -368,8 +438,17 @@ function validateMessage(input) {
     case "backend.scene.create":
       validateSceneCreatePayload(payload, id);
       break;
+    case "backend.scene.update":
+      validateSceneUpdatePayload(payload, id);
+      break;
     case "backend.token.create":
       validateTokenCreatePayload(payload, id);
+      break;
+    case "backend.wall.create":
+      validateWallCreatePayload(payload, id);
+      break;
+    case "backend.light.create":
+      validateLightCreatePayload(payload, id);
       break;
     case "backend.data.upload":
       validateDataUploadPayload(payload, id);
@@ -771,7 +850,10 @@ class RelayClient {
         journalCreate: true,
         rolltableCreate: true,
         sceneCreate: true,
+        sceneUpdate: true,
         tokenCreate: true,
+        wallCreate: true,
+        lightCreate: true,
         systemId: this.ctx.systemId,
         systemVersion: this.ctx.systemVersion,
         foundryVersion: this.ctx.foundryVersion
@@ -817,8 +899,17 @@ class RelayClient {
       case "backend.scene.create":
         void this.handleSceneCreate(message.payload);
         break;
+      case "backend.scene.update":
+        void this.handleSceneUpdate(message.payload);
+        break;
       case "backend.token.create":
         void this.handleTokenCreate(message.payload);
+        break;
+      case "backend.wall.create":
+        void this.handleWallCreate(message.payload);
+        break;
+      case "backend.light.create":
+        void this.handleLightCreate(message.payload);
         break;
       case "backend.data.upload":
         void this.handleDataUpload(message.payload, message.id);
@@ -1501,6 +1592,166 @@ class RelayClient {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       error(`Token placement threw for "${actorName}": ${msg}`, err);
+    }
+  }
+  /**
+   * Resolve a scene by name (V2 Phase 3 helper). Looks up via
+   * `game.scenes.getName(name)` first — that's the match GM-facing
+   * tools should hit. Falls back to the active scene when `sceneName`
+   * is omitted. Returns null (with a warn log) if neither path
+   * produces a scene, and the caller skips rather than throwing —
+   * same "warn and return" failure mode used by handleTokenCreate
+   * when its scene lookup fails.
+   */
+  resolveSceneByName(sceneName, caller) {
+    if (sceneName !== void 0) {
+      const byName = game.scenes.getName(sceneName);
+      if (byName) return byName;
+      warn(`${caller}: scene "${sceneName}" not found — no matching scene in game.scenes`);
+      return null;
+    }
+    const active = game.scenes.active;
+    if (!active) {
+      warn(`${caller}: no scene_name given and no active scene — cannot resolve target`);
+      return null;
+    }
+    return active;
+  }
+  /**
+   * Handle a `backend.wall.create` payload (V2 Phase 3): place a single
+   * wall segment on a Scene via `scene.createEmbeddedDocuments("Wall", ...)`.
+   * Foundry's Wall document shape matches our payload's c/move/sense/sound/
+   * door 1:1, so we just pass the fields through without remapping.
+   */
+  async handleWallCreate(payload) {
+    const scene = this.resolveSceneByName(payload.sceneName, "handleWallCreate");
+    if (!scene) return;
+    try {
+      const wallData = {
+        c: payload.c,
+        move: payload.move,
+        sense: payload.sense,
+        sound: payload.sound,
+        door: payload.door
+      };
+      const created = await scene.createEmbeddedDocuments("Wall", [wallData]);
+      const wallId = created[0]?.id;
+      if (wallId) {
+        info(
+          `handleWallCreate: placed wall ${JSON.stringify(payload.c)} on scene "${scene.name ?? scene.id}" (move=${payload.move} sense=${payload.sense} door=${payload.door})`
+        );
+      } else {
+        warn(`handleWallCreate: createEmbeddedDocuments returned no id`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error(`handleWallCreate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
+    }
+  }
+  /**
+   * Handle a `backend.light.create` payload (V2 Phase 3): place an
+   * AmbientLight on a Scene. Foundry V13 nests radius/cone fields under
+   * `config` (distinct from the top-level x/y position), matching the
+   * AmbientLight document schema — the payload's flat fields map into
+   * that structure here at the handler.
+   *
+   * `color` at null/undefined falls through as undefined rather than an
+   * explicit null, since Foundry treats "key missing" as default-white
+   * but may render an explicit null as "no color" (blank).
+   */
+  async handleLightCreate(payload) {
+    const scene = this.resolveSceneByName(payload.sceneName, "handleLightCreate");
+    if (!scene) return;
+    try {
+      const lightConfig = {
+        dim: payload.dim,
+        bright: payload.bright,
+        angle: payload.angle ?? 360
+      };
+      if (payload.color !== void 0 && payload.color !== null) {
+        lightConfig.color = payload.color;
+      }
+      const lightData = {
+        x: payload.x,
+        y: payload.y,
+        rotation: payload.rotation ?? 0,
+        config: lightConfig
+      };
+      const created = await scene.createEmbeddedDocuments("AmbientLight", [lightData]);
+      const lightId = created[0]?.id;
+      if (lightId) {
+        info(
+          `handleLightCreate: placed light at (${payload.x},${payload.y}) on scene "${scene.name ?? scene.id}" (dim=${payload.dim} bright=${payload.bright} angle=${payload.angle ?? 360})`
+        );
+      } else {
+        warn(`handleLightCreate: createEmbeddedDocuments returned no id`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error(`handleLightCreate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
+    }
+  }
+  /**
+   * Handle a `backend.scene.update` payload (V2 Phase 3): apply scene-
+   * level setting changes. The payload uses flat camelCase fields so
+   * the backend's tool-use boundary is a flat shape; Foundry V13
+   * actually stores darkness/globalLight under `environment.*` and
+   * grid fields under `grid.*`, so this handler maps each field
+   * individually before calling `scene.update(...)`.
+   *
+   * Critical nesting (easy to get wrong, silent no-op if so):
+   *   - darkness → environment.darknessLevel (0..1)
+   *   - globalLight → environment.globalLight.enabled
+   *   - gridSize → grid.size
+   *   - gridDistance → grid.distance
+   *   - gridUnits → grid.units
+   *   - tokenVision → tokenVision (top-level)
+   *   - navigation → navigation (top-level)
+   *
+   * `handleSceneCreate` already uses these exact paths at creation time —
+   * same shapes at update time.
+   */
+  async handleSceneUpdate(payload) {
+    const scene = this.resolveSceneByName(payload.sceneName, "handleSceneUpdate");
+    if (!scene) return;
+    const updates = {};
+    const env = {};
+    const grid = {};
+    if (payload.darkness !== void 0) env.darknessLevel = payload.darkness;
+    if (payload.globalLight !== void 0) env.globalLight = { enabled: payload.globalLight };
+    if (Object.keys(env).length > 0) updates.environment = env;
+    if (payload.gridSize !== void 0) grid.size = payload.gridSize;
+    if (payload.gridDistance !== void 0) grid.distance = payload.gridDistance;
+    if (payload.gridUnits !== void 0) grid.units = payload.gridUnits;
+    if (Object.keys(grid).length > 0) updates.grid = grid;
+    if (payload.tokenVision !== void 0) updates.tokenVision = payload.tokenVision;
+    if (payload.navigation !== void 0) updates.navigation = payload.navigation;
+    if (Object.keys(updates).length === 0) {
+      warn("handleSceneUpdate: payload reduced to no changes — skipping update()");
+      return;
+    }
+    try {
+      await scene.update(updates);
+      info(
+        `handleSceneUpdate: updated scene "${scene.name ?? scene.id}" — fields=[${Object.keys(updates).join(", ")}]`
+      );
+      try {
+        const descParts = [];
+        if (payload.darkness !== void 0) descParts.push(`darkness=${payload.darkness}`);
+        if (payload.globalLight !== void 0) descParts.push(`globalLight=${payload.globalLight}`);
+        if (payload.tokenVision !== void 0) descParts.push(`tokenVision=${payload.tokenVision}`);
+        if (descParts.length > 0) {
+          await ChatMessage.create({
+            content: `<p>✓ Updated scene <em>${escapeHtml$1(scene.name ?? "active")}</em>: ${escapeHtml$1(descParts.join(", "))}</p>`,
+            style: CONST.CHAT_MESSAGE_STYLES.OTHER,
+            whisper: [this.ctx.gmUserId]
+          });
+        }
+      } catch {
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error(`handleSceneUpdate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
     }
   }
   /**
