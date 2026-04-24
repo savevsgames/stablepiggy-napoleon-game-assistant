@@ -1431,26 +1431,44 @@ export class RelayClient {
   /**
    * Handle a `backend.wall.create` payload (V2 Phase 3): place a single
    * wall segment on a Scene via `scene.createEmbeddedDocuments("Wall", ...)`.
-   * Foundry's Wall document shape matches our payload's c/move/sense/sound/
-   * door 1:1, so we just pass the fields through without remapping.
+   *
+   * Foundry V13 Wall schema quirks the backend can't know about (these
+   * shape the translation below):
+   *   1. move/sight/sound use WALL_RESTRICTION_TYPES: NONE=0, LIMITED=10,
+   *      NORMAL=20 — NOT the 0/1 our semantic payload carries. A raw
+   *      `move: 1` trips V13's schema validator ("1 is not a valid
+   *      choice") and the wall is rejected — exactly what happened on
+   *      the 2026-04-23 Otari smoke test.
+   *   2. The vision field is `sight` in V13, not `sense`. A `sense: 1`
+   *      field is silently dropped by V13's strict schema (unknown
+   *      property), so the wall would render without blocking vision
+   *      even if move were fixed — a nasty silent-no-op class the
+   *      smoke test almost missed.
+   *
+   * The protocol keeps semantic 0/1 values (portable across Foundry
+   * versions) and `sense` as the payload name (matching the intent
+   * "sense line-of-sight"). The version-specific translation lives here,
+   * so a future V14 change touches only this handler.
    */
   private async handleWallCreate(payload: BackendWallCreatePayload): Promise<void> {
     const scene = this.resolveSceneByName(payload.sceneName, "handleWallCreate");
     if (!scene) return;
 
+    const v13Restrict = (v: number) => (v > 0 ? 20 : 0);
+
     try {
       const wallData = {
         c: payload.c,
-        move: payload.move,
-        sense: payload.sense,
-        sound: payload.sound,
+        move: v13Restrict(payload.move),
+        sight: v13Restrict(payload.sense),
+        sound: v13Restrict(payload.sound),
         door: payload.door,
       };
       const created = await scene.createEmbeddedDocuments("Wall", [wallData]);
       const wallId = created[0]?.id;
       if (wallId) {
         info(
-          `handleWallCreate: placed wall ${JSON.stringify(payload.c)} on scene "${scene.name ?? scene.id}" (move=${payload.move} sense=${payload.sense} door=${payload.door})`
+          `handleWallCreate: placed wall ${JSON.stringify(payload.c)} on scene "${scene.name ?? scene.id}" (move=${payload.move}→${wallData.move} sense=${payload.sense}→sight=${wallData.sight} door=${payload.door})`
         );
       } else {
         warn(`handleWallCreate: createEmbeddedDocuments returned no id`);
