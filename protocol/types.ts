@@ -106,7 +106,10 @@ export type MessageKind =
   | "backend.journal.create"
   | "backend.rolltable.create"
   | "backend.scene.create"
+  | "backend.scene.update"
   | "backend.token.create"
+  | "backend.wall.create"
+  | "backend.light.create"
   | "backend.data.upload"
   | "ping"
   | "pong"
@@ -161,6 +164,12 @@ export interface ClientCapabilities {
   readonly sceneCreate?: boolean;
   /** Module can place tokens on scenes via `backend.token.create`. */
   readonly tokenCreate?: boolean;
+  /** Module can place walls on scenes via `backend.wall.create` (V2 Phase 3). */
+  readonly wallCreate?: boolean;
+  /** Module can place ambient lights on scenes via `backend.light.create` (V2 Phase 3). */
+  readonly lightCreate?: boolean;
+  /** Module can apply scene-level updates via `backend.scene.update` (V2 Phase 3). */
+  readonly sceneUpdate?: boolean;
   /** Module can persist Barn files to Foundry Data via `backend.data.upload` (Phase B.4 durability). */
   readonly dataUpload?: boolean;
   /** Foundry system module ID, e.g. "pf2e". */
@@ -530,6 +539,112 @@ export interface BackendSceneCreatePayload {
 }
 
 /**
+ * Payload for `backend.wall.create` (V2 Phase 3). The backend sends this
+ * to place a single wall segment on a Scene — typically as part of a
+ * batch emitted during adventure import or scene-blueprint enrichment.
+ * Coordinates are scene pixels (NOT grid cells), matching Foundry's
+ * internal Wall document shape.
+ *
+ * Defaults (if the flag is omitted):
+ *   - move: 1 (blocks movement)
+ *   - sense: 1 (blocks line-of-sight)
+ *   - sound: 0 (pass-through)
+ *   - door: 0 (plain wall, not a door)
+ *   - sceneName omitted → module uses the currently-active scene
+ *
+ * Doors (door > 0) still carry their own move/sense/sound flags so the
+ * backend can emit a "secret door that blocks sound" if it wants.
+ */
+export interface BackendWallCreatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /** Endpoint coordinates [x1, y1, x2, y2] in scene pixels. */
+  readonly c: readonly [number, number, number, number];
+  /** Movement restriction: 0 = pass-through, 1 = blocks movement. */
+  readonly move: number;
+  /** Line-of-sight restriction: 0 = see-through, 1 = blocks vision. */
+  readonly sense: number;
+  /** Sound propagation: 0 = pass-through, 1 = blocks sound. */
+  readonly sound: number;
+  /** Door type: 0 = plain wall, 1 = door, 2 = secret door. */
+  readonly door: number;
+  /** Target scene name (as given to `backend.scene.create`). Optional — default: active scene. */
+  readonly sceneName?: string;
+}
+
+/**
+ * Payload for `backend.light.create` (V2 Phase 3). Places an AmbientLight
+ * embedded document on a scene. Coordinates are scene pixels. `bright`
+ * is the inner fully-lit radius; `dim` is the outer dim-light radius
+ * (must be >= bright). `angle` defaults to 360 (omnidirectional); set
+ * smaller for a directional lantern and use `rotation` to aim it.
+ *
+ * Light only produces visible effect when the scene's globalLight is
+ * off — the adventure importer typically emits `backend.scene.update`
+ * with globalLight=false alongside a batch of `backend.light.create`.
+ */
+export interface BackendLightCreatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /** Light position X in scene pixels. */
+  readonly x: number;
+  /** Light position Y in scene pixels. */
+  readonly y: number;
+  /** Outer dim-light radius in scene pixels (must be >= bright). */
+  readonly dim: number;
+  /** Inner bright-light radius in scene pixels (fully lit). */
+  readonly bright: number;
+  /** Cone angle in degrees (0-360). Default: 360 (omnidirectional). */
+  readonly angle?: number;
+  /** Cone rotation in degrees, meaningful when angle < 360. Default: 0. */
+  readonly rotation?: number;
+  /** Hex color string (e.g. "#ff8800"). Default/null: Foundry's white. */
+  readonly color?: string | null;
+  /** Target scene name. Optional — default: active scene. */
+  readonly sceneName?: string;
+}
+
+/**
+ * Payload for `backend.scene.update` (V2 Phase 3). Targets an existing
+ * scene and applies any subset of the optional fields; omitted fields
+ * are left untouched.
+ *
+ * Fields use the backend's snake-tolerant camelCase shape; the module's
+ * handler maps to Foundry V13's actual document paths — most notably
+ * `darkness` → `environment.darknessLevel` and `globalLight` →
+ * `environment.globalLight.enabled`. Getting that nesting wrong
+ * produces a silent no-op rather than a thrown error (Foundry drops
+ * unknown keys without complaint), which is why this payload's shape
+ * is deliberately narrow: one field per knob, all optional, so the
+ * handler's mapping is an obvious 1:1.
+ *
+ * Typical use: after `backend.scene.create` (which ships flat-lit
+ * defaults) + a batch of `backend.wall.create` / `backend.light.create`,
+ * emit a scene.update with globalLight=false + tokenVision=true to
+ * activate the vision system the walls gate.
+ */
+export interface BackendSceneUpdatePayload {
+  /** The message ID of the originating client.query, if any. */
+  readonly correlationId: string | null;
+  /** Target scene name. Optional — default: active scene. */
+  readonly sceneName?: string;
+  /** Whether the scene is globally lit (ignoring light sources). */
+  readonly globalLight?: boolean;
+  /** Darkness level 0.0 (full daylight) to 1.0 (pitch black). */
+  readonly darkness?: number;
+  /** Whether token-based vision is enforced (false = all tokens see everything). */
+  readonly tokenVision?: boolean;
+  /** Grid cell size in pixels. */
+  readonly gridSize?: number;
+  /** In-game distance per grid cell. */
+  readonly gridDistance?: number;
+  /** Unit label for grid distance. */
+  readonly gridUnits?: string;
+  /** Show the scene in the nav bar. */
+  readonly navigation?: boolean;
+}
+
+/**
  * A single page in a `backend.journal.create` message. Tier 1 supports
  * text pages only; Tier 2 adds image, PDF, and video pages.
  */
@@ -755,6 +870,12 @@ export type BackendRollTableCreateMessage = BaseMessage<"backend.rolltable.creat
 export type BackendSceneCreateMessage = BaseMessage<"backend.scene.create", BackendSceneCreatePayload>;
 /** `backend.token.create` — backend → relay → module, place an actor's token on a scene. */
 export type BackendTokenCreateMessage = BaseMessage<"backend.token.create", BackendTokenCreatePayload>;
+/** `backend.wall.create` — backend → relay → module, place a wall segment on a scene (V2 Phase 3). */
+export type BackendWallCreateMessage = BaseMessage<"backend.wall.create", BackendWallCreatePayload>;
+/** `backend.light.create` — backend → relay → module, place an ambient light on a scene (V2 Phase 3). */
+export type BackendLightCreateMessage = BaseMessage<"backend.light.create", BackendLightCreatePayload>;
+/** `backend.scene.update` — backend → relay → module, apply scene-level setting changes (V2 Phase 3). */
+export type BackendSceneUpdateMessage = BaseMessage<"backend.scene.update", BackendSceneUpdatePayload>;
 /** `backend.data.upload` — backend → relay → module, persist Barn file into Foundry Data (+ optional follow-up). */
 export type BackendDataUploadMessage = BaseMessage<"backend.data.upload", BackendDataUploadPayload>;
 /** `client.data_upload_ack` — module → relay → backend, telemetry for a data.upload outcome. */
@@ -783,7 +904,10 @@ export type ProtocolMessage =
   | BackendJournalCreateMessage
   | BackendRollTableCreateMessage
   | BackendSceneCreateMessage
+  | BackendSceneUpdateMessage
   | BackendTokenCreateMessage
+  | BackendWallCreateMessage
+  | BackendLightCreateMessage
   | BackendDataUploadMessage
   | ClientDataUploadAckMessage
   | ClientWorldSaveRequestMessage
@@ -1191,6 +1315,158 @@ function validateSceneCreatePayload(
   }
 }
 
+function validateWallCreatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  assert(Array.isArray(payload.c), "payload.c", "array of 4 numbers", correlationId);
+  const c = payload.c as unknown[];
+  assert(c.length === 4, "payload.c", "array of exactly 4 numbers", correlationId);
+  for (let i = 0; i < 4; i++) {
+    assert(
+      typeof c[i] === "number" && Number.isFinite(c[i] as number),
+      `payload.c[${i}]`,
+      "finite number",
+      correlationId
+    );
+  }
+  for (const flag of ["move", "sense", "sound", "door"] as const) {
+    assert(
+      typeof payload[flag] === "number" && Number.isInteger(payload[flag]) && (payload[flag] as number) >= 0,
+      `payload.${flag}`,
+      "non-negative integer",
+      correlationId
+    );
+  }
+  // Sanity bounds — Foundry's actual flags are 0/1 (or 0/1/2 for door);
+  // anything higher is meaningless. Reject early so a malformed backend
+  // doesn't bloat scene documents with junk values.
+  assert((payload.move as number) <= 1, "payload.move", "0 or 1", correlationId);
+  assert((payload.sense as number) <= 1, "payload.sense", "0 or 1", correlationId);
+  assert((payload.sound as number) <= 1, "payload.sound", "0 or 1", correlationId);
+  assert((payload.door as number) <= 2, "payload.door", "0, 1, or 2", correlationId);
+  if ("sceneName" in payload) {
+    assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
+  }
+}
+
+function validateLightCreatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  for (const field of ["x", "y", "dim", "bright"] as const) {
+    assert(
+      typeof payload[field] === "number" && Number.isFinite(payload[field] as number),
+      `payload.${field}`,
+      "finite number",
+      correlationId
+    );
+  }
+  assert((payload.dim as number) >= 0, "payload.dim", "non-negative", correlationId);
+  assert((payload.bright as number) >= 0, "payload.bright", "non-negative", correlationId);
+  assert(
+    (payload.bright as number) <= (payload.dim as number),
+    "payload.bright",
+    "<= payload.dim (bright is the inner fully-lit radius, dim is the outer dim-light radius)",
+    correlationId
+  );
+  if ("angle" in payload) {
+    assert(
+      typeof payload.angle === "number" && Number.isFinite(payload.angle) && payload.angle >= 0 && payload.angle <= 360,
+      "payload.angle",
+      "number in [0, 360]",
+      correlationId
+    );
+  }
+  if ("rotation" in payload) {
+    assert(
+      typeof payload.rotation === "number" && Number.isFinite(payload.rotation),
+      "payload.rotation",
+      "finite number",
+      correlationId
+    );
+  }
+  if ("color" in payload) {
+    assert(
+      payload.color === null || typeof payload.color === "string",
+      "payload.color",
+      "string or null when present",
+      correlationId
+    );
+  }
+  if ("sceneName" in payload) {
+    assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
+  }
+}
+
+function validateSceneUpdatePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(
+    payload.correlationId === null || typeof payload.correlationId === "string",
+    "payload.correlationId",
+    "string or null",
+    correlationId
+  );
+  if ("sceneName" in payload) {
+    assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
+  }
+  if ("globalLight" in payload) {
+    assert(typeof payload.globalLight === "boolean", "payload.globalLight", "boolean when present", correlationId);
+  }
+  if ("darkness" in payload) {
+    assert(
+      typeof payload.darkness === "number" && Number.isFinite(payload.darkness) && payload.darkness >= 0 && payload.darkness <= 1,
+      "payload.darkness",
+      "number in [0, 1]",
+      correlationId
+    );
+  }
+  if ("tokenVision" in payload) {
+    assert(typeof payload.tokenVision === "boolean", "payload.tokenVision", "boolean when present", correlationId);
+  }
+  if ("gridSize" in payload) {
+    assert(
+      typeof payload.gridSize === "number" && payload.gridSize > 0,
+      "payload.gridSize",
+      "positive number when present",
+      correlationId
+    );
+  }
+  if ("gridDistance" in payload) {
+    assert(
+      typeof payload.gridDistance === "number" && payload.gridDistance > 0,
+      "payload.gridDistance",
+      "positive number when present",
+      correlationId
+    );
+  }
+  if ("gridUnits" in payload) {
+    assert(typeof payload.gridUnits === "string", "payload.gridUnits", "string when present", correlationId);
+  }
+  if ("navigation" in payload) {
+    assert(typeof payload.navigation === "boolean", "payload.navigation", "boolean when present", correlationId);
+  }
+  // Reject no-op updates — every field missing means the backend emitted
+  // a dead command. Self-correcting error instead of a silent no-op.
+  const updateKeys = ["globalLight", "darkness", "tokenVision", "gridSize", "gridDistance", "gridUnits", "navigation"];
+  const hasUpdate = updateKeys.some((k) => k in payload);
+  assert(hasUpdate, "payload", `one of [${updateKeys.join(", ")}] to be present`, correlationId);
+}
+
 function validateJournalCreatePayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -1468,8 +1744,17 @@ export function validateMessage(input: unknown): ProtocolMessage {
     case "backend.scene.create":
       validateSceneCreatePayload(payload, id);
       break;
+    case "backend.scene.update":
+      validateSceneUpdatePayload(payload, id);
+      break;
     case "backend.token.create":
       validateTokenCreatePayload(payload, id);
+      break;
+    case "backend.wall.create":
+      validateWallCreatePayload(payload, id);
+      break;
+    case "backend.light.create":
+      validateLightCreatePayload(payload, id);
       break;
     case "backend.data.upload":
       validateDataUploadPayload(payload, id);

@@ -32,6 +32,9 @@ import type {
   BackendChatCreatePayload,
   BackendActorCreatePayload,
   BackendJournalCreatePayload,
+  BackendWallCreatePayload,
+  BackendLightCreatePayload,
+  BackendSceneUpdatePayload,
 } from "./index.js";
 
 // ============================================================================
@@ -154,6 +157,36 @@ function validJournalCreatePayload(): BackendJournalCreatePayload {
         text: { content: "<p>Session overview.</p>", format: 1 },
       },
     ],
+  };
+}
+
+function validWallCreatePayload(): BackendWallCreatePayload {
+  return {
+    correlationId: null,
+    c: [100, 200, 100, 400],
+    move: 1,
+    sense: 1,
+    sound: 0,
+    door: 0,
+  };
+}
+
+function validLightCreatePayload(): BackendLightCreatePayload {
+  return {
+    correlationId: null,
+    x: 500,
+    y: 500,
+    dim: 200,
+    bright: 100,
+  };
+}
+
+function validSceneUpdatePayload(): BackendSceneUpdatePayload {
+  return {
+    correlationId: null,
+    globalLight: false,
+    darkness: 0.5,
+    tokenVision: true,
   };
 }
 
@@ -345,6 +378,75 @@ section("backend.journal.create");
         },
       ],
     }),
+    "validation_failed"
+  );
+}
+
+section("backend.wall.create (V2 Phase 3)");
+{
+  assertAccepts("valid wall.create", makeMessage("backend.wall.create", validWallCreatePayload()));
+
+  const badCoords = validWallCreatePayload();
+  assertRejects(
+    "rejects wall.create with c of wrong length",
+    makeMessage("backend.wall.create", { ...badCoords, c: [1, 2, 3] as unknown as readonly [number, number, number, number] }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects wall.create with move=2 (only 0 or 1 allowed)",
+    makeMessage("backend.wall.create", { ...validWallCreatePayload(), move: 2 }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects wall.create with door=3 (only 0, 1, or 2 allowed)",
+    makeMessage("backend.wall.create", { ...validWallCreatePayload(), door: 3 }),
+    "validation_failed"
+  );
+}
+
+section("backend.light.create (V2 Phase 3)");
+{
+  assertAccepts("valid light.create", makeMessage("backend.light.create", validLightCreatePayload()));
+
+  assertRejects(
+    "rejects light.create with bright > dim",
+    makeMessage("backend.light.create", { ...validLightCreatePayload(), dim: 50, bright: 100 }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects light.create with negative dim",
+    makeMessage("backend.light.create", { ...validLightCreatePayload(), dim: -10 }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects light.create with angle > 360",
+    makeMessage("backend.light.create", { ...validLightCreatePayload(), angle: 361 }),
+    "validation_failed"
+  );
+}
+
+section("backend.scene.update (V2 Phase 3)");
+{
+  assertAccepts("valid scene.update", makeMessage("backend.scene.update", validSceneUpdatePayload()));
+
+  assertAccepts(
+    "valid scene.update with only sceneName + single field",
+    makeMessage("backend.scene.update", { correlationId: null, sceneName: "market-square", darkness: 0.3 })
+  );
+
+  assertRejects(
+    "rejects scene.update with no update fields (no-op guard)",
+    makeMessage("backend.scene.update", { correlationId: null }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects scene.update with darkness > 1",
+    makeMessage("backend.scene.update", { ...validSceneUpdatePayload(), darkness: 1.5 }),
     "validation_failed"
   );
 }

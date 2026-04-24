@@ -24,7 +24,15 @@ import type {
   BackendChatCreatePayload,
   BackendActorCreatePayload,
   BackendJournalCreatePayload,
+  BackendSceneCreatePayload,
+  BackendSceneUpdatePayload,
+  BackendTokenCreatePayload,
+  BackendWallCreatePayload,
+  BackendLightCreatePayload,
 } from "@stablepiggy-napoleon/protocol";
+// BackendDataUploadPayload is declared locally below (line ~216) rather
+// than imported — the relay's copy predates the protocol-level type and
+// kept them intentionally distinct for M2-era backward compat.
 
 import type { ConnectionState } from "./connection-state.js";
 import type { Config } from "./config.js";
@@ -50,7 +58,13 @@ export type BackendCommand =
   | { kind: "backend.actor.create"; payload: BackendActorCreatePayload }
   | { kind: "backend.actor.update"; payload: BackendActorUpdatePayload }
   | { kind: "backend.journal.create"; payload: BackendJournalCreatePayload }
-  | { kind: "backend.rolltable.create"; payload: BackendRollTableCreatePayload };
+  | { kind: "backend.rolltable.create"; payload: BackendRollTableCreatePayload }
+  | { kind: "backend.scene.create"; payload: BackendSceneCreatePayload }
+  | { kind: "backend.scene.update"; payload: BackendSceneUpdatePayload }
+  | { kind: "backend.token.create"; payload: BackendTokenCreatePayload }
+  | { kind: "backend.wall.create"; payload: BackendWallCreatePayload }
+  | { kind: "backend.light.create"; payload: BackendLightCreatePayload }
+  | { kind: "backend.data.upload"; payload: BackendDataUploadPayload };
 
 export interface BackendResponse {
   commands: BackendCommand[];

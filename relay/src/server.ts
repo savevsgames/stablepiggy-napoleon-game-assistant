@@ -280,7 +280,10 @@ async function handleMessage(
       case "backend.journal.create":
       case "backend.rolltable.create":
       case "backend.scene.create":
+      case "backend.scene.update":
       case "backend.token.create":
+      case "backend.wall.create":
+      case "backend.light.create":
       case "backend.data.upload":
         // Server-to-client message kinds — rejecting if a client sends one
         // catches confused clients or replay attacks.
