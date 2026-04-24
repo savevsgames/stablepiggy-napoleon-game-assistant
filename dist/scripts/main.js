@@ -101,6 +101,9 @@ function validateQueryContext(value, correlationId) {
   assert(isPlainObject(value), "payload.context", "an object", correlationId);
   const ctx = value;
   assert(ctx.sceneId === null || typeof ctx.sceneId === "string", "context.sceneId", "string or null", correlationId);
+  if ("sceneName" in ctx && ctx.sceneName !== void 0) {
+    assert(ctx.sceneName === null || typeof ctx.sceneName === "string", "context.sceneName", "string or null when present", correlationId);
+  }
   assert(isStringArray(ctx.selectedActorIds), "context.selectedActorIds", "string array", correlationId);
   assert(typeof ctx.inCombat === "boolean", "context.inCombat", "boolean", correlationId);
   assert(isStringArray(ctx.recentChat), "context.recentChat", "string array", correlationId);
@@ -2024,14 +2027,13 @@ async function handleNapoleonQuery(client, sessionId, query) {
   }
   const snapshot = await captureViewportSnapshot();
   const worldFiles = await listWorldFiles(game.world.id);
+  const activeScene = game.scenes.current ?? null;
   const queryId = client.sendQuery({
     sessionId,
     query,
     context: {
-      // Tier 1 leaves these empty. M5 could plumb through game.scenes
-      // .current?.id and selected actors, but the plan doesn't require
-      // it and the backend stub doesn't use them yet.
-      sceneId: null,
+      sceneId: activeScene?.id ?? null,
+      sceneName: activeScene?.name ?? null,
       selectedActorIds: [],
       inCombat: false,
       recentChat: []
