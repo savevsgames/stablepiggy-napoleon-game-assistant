@@ -104,6 +104,13 @@ function validateQueryContext(value, correlationId) {
   if ("sceneName" in ctx && ctx.sceneName !== void 0) {
     assert(ctx.sceneName === null || typeof ctx.sceneName === "string", "context.sceneName", "string or null when present", correlationId);
   }
+  if ("sceneDimensions" in ctx && ctx.sceneDimensions !== void 0 && ctx.sceneDimensions !== null) {
+    assert(isPlainObject(ctx.sceneDimensions), "context.sceneDimensions", "an object", correlationId);
+    const dims = ctx.sceneDimensions;
+    for (const field of ["imageX", "imageY", "imageWidth", "imageHeight", "totalWidth", "totalHeight", "gridSize"]) {
+      assert(typeof dims[field] === "number" && Number.isFinite(dims[field]), `context.sceneDimensions.${field}`, "finite number", correlationId);
+    }
+  }
   assert(isStringArray(ctx.selectedActorIds), "context.selectedActorIds", "string array", correlationId);
   assert(typeof ctx.inCombat === "boolean", "context.inCombat", "boolean", correlationId);
   assert(isStringArray(ctx.recentChat), "context.recentChat", "string array", correlationId);
@@ -2045,12 +2052,23 @@ async function handleNapoleonQuery(client, sessionId, query) {
   const snapshot = await captureViewportSnapshot();
   const worldFiles = await listWorldFiles(game.world.id);
   const activeScene = game.scenes.current ?? null;
+  const activeDims = activeScene?.dimensions;
+  const sceneDimensions = activeDims ? {
+    imageX: activeDims.sceneX,
+    imageY: activeDims.sceneY,
+    imageWidth: activeDims.sceneWidth,
+    imageHeight: activeDims.sceneHeight,
+    totalWidth: activeDims.width,
+    totalHeight: activeDims.height,
+    gridSize: activeDims.size
+  } : null;
   const queryId = client.sendQuery({
     sessionId,
     query,
     context: {
       sceneId: activeScene?.id ?? null,
       sceneName: activeScene?.name ?? null,
+      sceneDimensions,
       selectedActorIds: [],
       inCombat: false,
       recentChat: []
