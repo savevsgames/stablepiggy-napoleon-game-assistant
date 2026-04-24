@@ -78,6 +78,15 @@ export interface BackendResponse {
     modelUsed: string;
     durationMs: number;
     correlationId?: string;
+    /**
+     * V2 Phase 3 auto-continuation. When true, the backend's execution
+     * loop hit its per-query turn/token/timeout cap while the LLM was
+     * still calling tools — relay should fire a continuation query
+     * (up to MAX_CONTINUATIONS) so compound workflows finish across
+     * multiple HTTP queries. Absent/false on legacy responses; relay
+     * treats undefined as "no continuation" (old behavior).
+     */
+    continuationPending?: boolean;
   };
 }
 

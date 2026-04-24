@@ -460,7 +460,7 @@ async function handleQuery(
   }
 
   try {
-    const response = await forwardQueryToBackend(
+    let response = await forwardQueryToBackend(
       state,
       message.payload,
       message.id,
@@ -475,11 +475,83 @@ async function handleQuery(
       sendMessage(state, wrapped);
     }
 
+    let totalCommandCount = response.commands.length;
+
+    // V2 Phase 3 auto-continuation: when the backend's execution loop
+    // exited with work still pending (turn/token/time cap hit, LLM was
+    // still calling tools), auto-fire a continuation query so compound
+    // workflows (dungeon builds with walls + lights + doors) finish
+    // across multiple HTTP queries. User perceives "batch lands → pause
+    // → next batch lands" instead of one big wait + burst.
+    //
+    // Cap prevents runaway loops: MAX_CONTINUATIONS × backend's per-
+    // query MAX_LOOP_TURNS (3) bounds total LLM turns per original
+    // user query at 18. The backend short-circuits continuationPending
+    // on LLM errors, so a broken provider doesn't retry-spam us.
+    const MAX_CONTINUATIONS = 5;
+    const CONTINUATION_PAUSE_MS = 1000;
+    let continuationCount = 0;
+
+    while (
+      response.meta.continuationPending === true &&
+      continuationCount < MAX_CONTINUATIONS
+    ) {
+      continuationCount++;
+      log.info(
+        {
+          queryId: message.id,
+          continuationCount,
+          max: MAX_CONTINUATIONS,
+          priorCommands: totalCommandCount,
+        },
+        "auto-continuation firing"
+      );
+      await new Promise((r) => setTimeout(r, CONTINUATION_PAUSE_MS));
+
+      try {
+        response = await forwardQueryToBackend(
+          state,
+          {
+            ...message.payload,
+            query:
+              "Continue the previous task — pick up exactly where you left off. Keep emitting the remaining walls, lights, scene updates, tokens, or other tools the GM originally asked for. When fully done, respond with a plain-text summary and stop (do not call any more tools).",
+          },
+          message.id,
+          config,
+          log
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "unknown backend error";
+        log.warn(
+          { err: msg, queryId: message.id, continuationCount },
+          "auto-continuation failed — stopping chain"
+        );
+        break;
+      }
+
+      for (const command of response.commands) {
+        const wrapped = makeMessage(command.kind, command.payload as never);
+        sendMessage(state, wrapped);
+      }
+      totalCommandCount += response.commands.length;
+    }
+
+    if (
+      response.meta.continuationPending === true &&
+      continuationCount >= MAX_CONTINUATIONS
+    ) {
+      log.warn(
+        { queryId: message.id, continuationCount, totalCommandCount },
+        "auto-continuation cap reached — stopping chain with work still pending"
+      );
+    }
+
     log.info(
       {
         queryId: message.id,
-        commandCount: response.commands.length,
-        durationMs: response.meta.durationMs,
+        commandCount: totalCommandCount,
+        continuationCount,
+        lastDurationMs: response.meta.durationMs,
         model: response.meta.modelUsed,
         tokens: response.meta.tokensUsed,
       },
