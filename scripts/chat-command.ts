@@ -151,7 +151,24 @@ declare const game: {
   };
   world: { readonly id: string };
   scenes: {
-    readonly current?: { readonly id: string; readonly name?: string } | null;
+    readonly current?: {
+      readonly id: string;
+      readonly name?: string;
+      // Foundry V13 computes scene.dimensions per scene. We read imageX/Y
+      // (where the background image actually starts inside the padded
+      // canvas) + image dimensions + total padded dimensions + grid size,
+      // so the backend can tell Napoleon to place walls/lights on the
+      // image instead of in the padding margin.
+      readonly dimensions?: {
+        readonly sceneX: number;
+        readonly sceneY: number;
+        readonly sceneWidth: number;
+        readonly sceneHeight: number;
+        readonly width: number;
+        readonly height: number;
+        readonly size: number;
+      };
+    } | null;
   };
 };
 
@@ -298,19 +315,36 @@ async function handleNapoleonQuery(
   // Send the query. This returns the message id that the backend will
   // echo back as `correlationId` on the response — which is what we
   // key the placeholder replacement on.
-  // V2 Phase 3: include the currently-active scene id + name so the
-  // backend knows which scene the GM is looking at. Without this,
-  // Napoleon guesses from session memory and often names a stale scene
-  // (see the "Abomination Vaults Shoreline Ambush" regression in the
-  // Otari smoke test). Falls back to null on both when no scene is
-  // active — backend treats null as "no active-scene context".
+  // V2 Phase 3: include the currently-active scene id + name + dimensions
+  // so the backend knows which scene the GM is looking at AND where the
+  // background image actually sits inside the padded scene canvas.
+  // Without dimensions, Napoleon places walls at scene (0, 0) which is
+  // the top-left of the padding, not the image — see the dungeon smoke
+  // test where perimeter walls rendered outside the map.
+  //
+  // Falls back to null on inactive scene. dimensions is omitted (undefined)
+  // if Foundry's API doesn't expose it on the current scene; the backend
+  // treats undefined as "don't inject image-bounds block".
   const activeScene = game.scenes.current ?? null;
+  const activeDims = activeScene?.dimensions;
+  const sceneDimensions = activeDims
+    ? {
+        imageX: activeDims.sceneX,
+        imageY: activeDims.sceneY,
+        imageWidth: activeDims.sceneWidth,
+        imageHeight: activeDims.sceneHeight,
+        totalWidth: activeDims.width,
+        totalHeight: activeDims.height,
+        gridSize: activeDims.size,
+      }
+    : null;
   const queryId = client.sendQuery({
     sessionId,
     query,
     context: {
       sceneId: activeScene?.id ?? null,
       sceneName: activeScene?.name ?? null,
+      sceneDimensions,
       selectedActorIds: [],
       inCombat: false,
       recentChat: [],

@@ -269,6 +269,35 @@ export interface RelayWelcomePayload {
  * empty or minimal context; Tier 2 starts populating the scene and combat
  * fields for tactical assist features.
  */
+/**
+ * Scene dimensional data (V2 Phase 3 addition). Foundry's scene
+ * coordinate space includes a padding ring around the image, so
+ * pixel (0, 0) in scene space is the top-left of the PADDED canvas,
+ * NOT the top-left of the visible background image. Napoleon needs
+ * the image's actual bounds (sceneX/sceneY/sceneWidth/sceneHeight
+ * from Foundry's scene.dimensions) to place walls, lights, and
+ * tokens on the map instead of in the padding margin.
+ *
+ * All values in scene pixels. Sourced from `game.scenes.current.dimensions`
+ * which Foundry V13 computes per scene.
+ */
+export interface SceneDimensions {
+  /** X pixel where the background image starts inside the padded canvas. */
+  readonly imageX: number;
+  /** Y pixel where the background image starts inside the padded canvas. */
+  readonly imageY: number;
+  /** Image width in pixels. */
+  readonly imageWidth: number;
+  /** Image height in pixels. */
+  readonly imageHeight: number;
+  /** Full padded canvas width (image + padding on both sides). */
+  readonly totalWidth: number;
+  /** Full padded canvas height. */
+  readonly totalHeight: number;
+  /** Grid cell size in pixels. */
+  readonly gridSize: number;
+}
+
 export interface QueryContext {
   /** Currently-active scene ID in Foundry, or null if none. */
   readonly sceneId: string | null;
@@ -280,6 +309,14 @@ export interface QueryContext {
    * scene instead of the last one Napoleon remembers.
    */
   readonly sceneName?: string | null;
+  /**
+   * Currently-active scene's computed dimensions (V2 Phase 3). Lets
+   * the backend tell Napoleon where the image actually sits in the
+   * padded scene canvas so walls/lights target the visible map, not
+   * the padding. Omitted on modules that predate the addition; omitted
+   * when no scene is active (even on up-to-date modules).
+   */
+  readonly sceneDimensions?: SceneDimensions | null;
   /** IDs of actors currently selected by the GM. */
   readonly selectedActorIds: readonly string[];
   /** Whether the combat tracker is open and in an active combat. */
@@ -1121,6 +1158,20 @@ function validateQueryContext(
       "string or null when present",
       correlationId
     );
+  }
+  // sceneDimensions is optional. When present + not null, all 7 numeric
+  // fields must be finite. Omitted / null is the no-active-scene case.
+  if ("sceneDimensions" in ctx && ctx.sceneDimensions !== undefined && ctx.sceneDimensions !== null) {
+    assert(isPlainObject(ctx.sceneDimensions), "context.sceneDimensions", "an object", correlationId);
+    const dims = ctx.sceneDimensions;
+    for (const field of ["imageX", "imageY", "imageWidth", "imageHeight", "totalWidth", "totalHeight", "gridSize"] as const) {
+      assert(
+        typeof dims[field] === "number" && Number.isFinite(dims[field] as number),
+        `context.sceneDimensions.${field}`,
+        "finite number",
+        correlationId
+      );
+    }
   }
   assert(isStringArray(ctx.selectedActorIds), "context.selectedActorIds", "string array", correlationId);
   assert(typeof ctx.inCombat === "boolean", "context.inCombat", "boolean", correlationId);
