@@ -241,6 +241,9 @@ function validateWallCreatePayload(payload, correlationId) {
   assert(payload.sense <= 1, "payload.sense", "0 or 1", correlationId);
   assert(payload.sound <= 1, "payload.sound", "0 or 1", correlationId);
   assert(payload.door <= 2, "payload.door", "0, 1, or 2", correlationId);
+  if ("coordMode" in payload && payload.coordMode !== void 0) {
+    assert(payload.coordMode === "image" || payload.coordMode === "scene", "payload.coordMode", "'image' or 'scene' when present", correlationId);
+  }
   if ("sceneName" in payload) {
     assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
   }
@@ -261,6 +264,9 @@ function validateLightCreatePayload(payload, correlationId) {
   }
   if ("color" in payload) {
     assert(payload.color === null || typeof payload.color === "string", "payload.color", "string or null when present", correlationId);
+  }
+  if ("coordMode" in payload && payload.coordMode !== void 0) {
+    assert(payload.coordMode === "image" || payload.coordMode === "scene", "payload.coordMode", "'image' or 'scene' when present", correlationId);
   }
   if ("sceneName" in payload) {
     assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
@@ -1653,9 +1659,24 @@ class RelayClient {
     const scene = this.resolveSceneByName(payload.sceneName, "handleWallCreate");
     if (!scene) return;
     const v13Restrict = (v) => v > 0 ? 20 : 0;
+    const mode = payload.coordMode ?? "image";
+    let [x1, y1, x2, y2] = payload.c;
+    if (mode === "image") {
+      const dims = scene.dimensions;
+      if (dims) {
+        x1 += dims.sceneX;
+        y1 += dims.sceneY;
+        x2 += dims.sceneX;
+        y2 += dims.sceneY;
+      } else {
+        warn(
+          `handleWallCreate: scene "${scene.name ?? scene.id}" missing dimensions — falling back to image=scene pass-through`
+        );
+      }
+    }
     try {
       const wallData = {
-        c: payload.c,
+        c: [x1, y1, x2, y2],
         move: v13Restrict(payload.move),
         sight: v13Restrict(payload.sense),
         sound: v13Restrict(payload.sound),
@@ -1665,7 +1686,7 @@ class RelayClient {
       const wallId = created[0]?.id;
       if (wallId) {
         info(
-          `handleWallCreate: placed wall ${JSON.stringify(payload.c)} on scene "${scene.name ?? scene.id}" (move=${payload.move}→${wallData.move} sense=${payload.sense}→sight=${wallData.sight} door=${payload.door})`
+          `handleWallCreate: placed wall input=${JSON.stringify(payload.c)} (mode=${mode}) → final=${JSON.stringify(wallData.c)} on "${scene.name ?? scene.id}" (move=${payload.move}→${wallData.move} sense=${payload.sense}→sight=${wallData.sight} door=${payload.door})`
         );
       } else {
         warn(`handleWallCreate: createEmbeddedDocuments returned no id`);
@@ -1689,6 +1710,20 @@ class RelayClient {
   async handleLightCreate(payload) {
     const scene = this.resolveSceneByName(payload.sceneName, "handleLightCreate");
     if (!scene) return;
+    const mode = payload.coordMode ?? "image";
+    let x = payload.x;
+    let y = payload.y;
+    if (mode === "image") {
+      const dims = scene.dimensions;
+      if (dims) {
+        x += dims.sceneX;
+        y += dims.sceneY;
+      } else {
+        warn(
+          `handleLightCreate: scene "${scene.name ?? scene.id}" missing dimensions — falling back to image=scene pass-through`
+        );
+      }
+    }
     try {
       const lightConfig = {
         dim: payload.dim,
@@ -1699,8 +1734,8 @@ class RelayClient {
         lightConfig.color = payload.color;
       }
       const lightData = {
-        x: payload.x,
-        y: payload.y,
+        x,
+        y,
         rotation: payload.rotation ?? 0,
         config: lightConfig
       };
@@ -1708,7 +1743,7 @@ class RelayClient {
       const lightId = created[0]?.id;
       if (lightId) {
         info(
-          `handleLightCreate: placed light at (${payload.x},${payload.y}) on scene "${scene.name ?? scene.id}" (dim=${payload.dim} bright=${payload.bright} angle=${payload.angle ?? 360})`
+          `handleLightCreate: placed light input=(${payload.x},${payload.y}) (mode=${mode}) → final=(${x},${y}) on "${scene.name ?? scene.id}" (dim=${payload.dim} bright=${payload.bright} angle=${payload.angle ?? 360})`
         );
       } else {
         warn(`handleLightCreate: createEmbeddedDocuments returned no id`);
