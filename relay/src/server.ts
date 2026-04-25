@@ -275,9 +275,13 @@ async function handleMessage(
         // V2 Phase 4 Commit 5c — forward to backend's
         // /my/foundry/module-ingest endpoint. Long-running (~10-90s
         // for AV-class) — fire-and-forget so other inbound WS
-        // messages don't queue behind ingestion. Errors are logged;
-        // future commits (5d/5e) wire chat-side progress + completion
-        // notifications back to the GM.
+        // messages don't queue behind ingestion.
+        //
+        // On success or failure, push a backend.chat.create whisper
+        // to the GM so the "Starting ingestion…" notice gets a
+        // matching completion message (Commit 5c originally deferred
+        // this; reinstated after live testing showed the silent-end
+        // UX was confusing — Greg waited 5min for AV).
         void forwardModuleContentToBackend(
           state,
           message.payload,
@@ -296,6 +300,7 @@ async function handleMessage(
               },
               "module-ingest forward complete",
             );
+            sendIngestCompletionChat(state, result, log);
           })
           .catch((err: unknown) => {
             const errMsg = err instanceof Error ? err.message : String(err);
@@ -303,6 +308,7 @@ async function handleMessage(
               { adventureId: message.payload.adventureId, err: errMsg },
               "module-ingest forward failed",
             );
+            sendIngestFailureChat(state, message.payload.adventureId, errMsg, log);
           });
         break;
       case "pong":
@@ -688,6 +694,77 @@ async function handleWorldSaveRequest(
 // with client.module_content.response which Commit 5c wired). The
 // "Not now" handler writes module_ingestion_declined_at server-side
 // and returns a chat.create confirmation.
+
+/**
+ * Push a backend.chat.create whisper announcing the ingestion result.
+ * Best-effort — connection may have dropped during the 10-90s ingest
+ * window. Failure to send is logged but never thrown.
+ */
+function sendIngestCompletionChat(
+  state: ConnectionState,
+  result: import("./backend-client.js").ModuleContentForwardResult,
+  log: Logger,
+): void {
+  if (!state.identityId) return;
+  const seconds = Math.max(1, Math.round(result.durationMs / 1000));
+  const html =
+    `<p><strong>Ingestion complete.</strong> Embedded ` +
+    `<strong>${result.chunksInserted}</strong> chunks of ` +
+    `${escapeChatHtml(result.adventureId)} content (v${escapeChatHtml(result.version)}) ` +
+    `in ${seconds}s. You can now ask Napoleon module-aware questions like ` +
+    `<em>"what's in A10?"</em> — the answer will quote the actual journal text.</p>`;
+  const wrapped = makeMessage("backend.chat.create", {
+    correlationId: null,
+    speaker: { alias: "Napoleon" },
+    content: html,
+    type: "whisper",
+    whisperTo: [state.identityId],
+  });
+  try {
+    sendMessage(state, wrapped);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.warn({ err: msg }, "failed to push ingest-completion chat");
+  }
+}
+
+function sendIngestFailureChat(
+  state: ConnectionState,
+  adventureId: string,
+  errMsg: string,
+  log: Logger,
+): void {
+  if (!state.identityId) return;
+  const html =
+    `<p><strong>Ingestion failed.</strong> Couldn't embed ` +
+    `${escapeChatHtml(adventureId)} content. ` +
+    `You can retry from the consent prompt the next time you run a /napoleon ` +
+    `query — the campaign's ingestion state was not persisted.</p>` +
+    `<p style="opacity:0.7;font-size:90%">` +
+    `Error: <code>${escapeChatHtml(errMsg.slice(0, 200))}</code></p>`;
+  const wrapped = makeMessage("backend.chat.create", {
+    correlationId: null,
+    speaker: { alias: "Napoleon" },
+    content: html,
+    type: "whisper",
+    whisperTo: [state.identityId],
+  });
+  try {
+    sendMessage(state, wrapped);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.warn({ err: msg }, "failed to push ingest-failure chat");
+  }
+}
+
+function escapeChatHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 async function handleAdventureIngestionRequest(
   state: ConnectionState,
