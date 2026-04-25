@@ -111,9 +111,73 @@ function validateQueryContext(value, correlationId) {
       assert(typeof dims[field] === "number" && Number.isFinite(dims[field]), `context.sceneDimensions.${field}`, "finite number", correlationId);
     }
   }
+  if ("worldContent" in ctx && ctx.worldContent !== void 0 && ctx.worldContent !== null) {
+    validateWorldContent(ctx.worldContent, correlationId);
+  }
   assert(isStringArray(ctx.selectedActorIds), "context.selectedActorIds", "string array", correlationId);
   assert(typeof ctx.inCombat === "boolean", "context.inCombat", "boolean", correlationId);
   assert(isStringArray(ctx.recentChat), "context.recentChat", "string array", correlationId);
+}
+function validateWorldContent(value, correlationId) {
+  assert(isPlainObject(value), "context.worldContent", "an object", correlationId);
+  const wc = value;
+  assert(Array.isArray(wc.actors), "context.worldContent.actors", "array", correlationId);
+  for (let i = 0; i < wc.actors.length; i++) {
+    const a = wc.actors[i];
+    assert(isPlainObject(a), `context.worldContent.actors[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString(a.id), `context.worldContent.actors[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(a.name), `context.worldContent.actors[${i}].name`, "non-empty string", correlationId);
+    assert(isNonEmptyString(a.type), `context.worldContent.actors[${i}].type`, "non-empty string", correlationId);
+    if ("level" in a && a.level !== void 0) {
+      assert(typeof a.level === "number" && Number.isFinite(a.level), `context.worldContent.actors[${i}].level`, "finite number when present", correlationId);
+    }
+    if ("folder" in a && a.folder !== void 0) {
+      assert(typeof a.folder === "string", `context.worldContent.actors[${i}].folder`, "string when present", correlationId);
+    }
+  }
+  assert(Array.isArray(wc.scenes), "context.worldContent.scenes", "array", correlationId);
+  for (let i = 0; i < wc.scenes.length; i++) {
+    const s = wc.scenes[i];
+    assert(isPlainObject(s), `context.worldContent.scenes[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString(s.id), `context.worldContent.scenes[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(s.name), `context.worldContent.scenes[${i}].name`, "non-empty string", correlationId);
+    assert(typeof s.active === "boolean", `context.worldContent.scenes[${i}].active`, "boolean", correlationId);
+    if ("folder" in s && s.folder !== void 0) {
+      assert(typeof s.folder === "string", `context.worldContent.scenes[${i}].folder`, "string when present", correlationId);
+    }
+  }
+  assert(Array.isArray(wc.journals), "context.worldContent.journals", "array", correlationId);
+  for (let i = 0; i < wc.journals.length; i++) {
+    const j = wc.journals[i];
+    assert(isPlainObject(j), `context.worldContent.journals[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString(j.id), `context.worldContent.journals[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(j.name), `context.worldContent.journals[${i}].name`, "non-empty string", correlationId);
+    if ("folder" in j && j.folder !== void 0) {
+      assert(typeof j.folder === "string", `context.worldContent.journals[${i}].folder`, "string when present", correlationId);
+    }
+    if ("pageCount" in j && j.pageCount !== void 0) {
+      assert(typeof j.pageCount === "number" && Number.isFinite(j.pageCount), `context.worldContent.journals[${i}].pageCount`, "finite number when present", correlationId);
+    }
+  }
+  assert(Array.isArray(wc.items), "context.worldContent.items", "array", correlationId);
+  for (let i = 0; i < wc.items.length; i++) {
+    const it = wc.items[i];
+    assert(isPlainObject(it), `context.worldContent.items[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString(it.id), `context.worldContent.items[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(it.name), `context.worldContent.items[${i}].name`, "non-empty string", correlationId);
+    assert(isNonEmptyString(it.type), `context.worldContent.items[${i}].type`, "non-empty string", correlationId);
+    if ("folder" in it && it.folder !== void 0) {
+      assert(typeof it.folder === "string", `context.worldContent.items[${i}].folder`, "string when present", correlationId);
+    }
+  }
+  assert(Array.isArray(wc.modules), "context.worldContent.modules", "array", correlationId);
+  for (let i = 0; i < wc.modules.length; i++) {
+    const m = wc.modules[i];
+    assert(isPlainObject(m), `context.worldContent.modules[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString(m.id), `context.worldContent.modules[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(m.title), `context.worldContent.modules[${i}].title`, "non-empty string", correlationId);
+    assert(typeof m.active === "boolean", `context.worldContent.modules[${i}].active`, "boolean", correlationId);
+  }
 }
 function validateQuerySnapshot(value, correlationId) {
   assert(isPlainObject(value), "payload.snapshot", "an object", correlationId);
