@@ -298,6 +298,70 @@ export interface SceneDimensions {
   readonly gridSize: number;
 }
 
+/**
+ * V2 Phase 4 — Module-Aware Napoleon. Compact summaries of the Foundry
+ * world's existing content so Napoleon can reference module-provided
+ * actors / scenes / journals / items by NAME instead of hallucinating
+ * duplicates. Module enumerates this on every `client.query` send when
+ * a Foundry session is connected; the backend injects a "## Current
+ * world contents" block into the composed user message.
+ *
+ * Summaries only — full documents stay out of the prompt budget.
+ * Phase 4b will add deep-read tools that fetch a single full document
+ * on demand when Napoleon needs more than a summary.
+ *
+ * Per-type entry caps are enforced module-side at enumeration time
+ * (defaults: actors 300, scenes 75, journals 250, items 200, modules
+ * 50; configurable per spec §10 Q4). Folder names are included so
+ * Napoleon can scope answers to a chapter / area folder.
+ */
+export interface WorldContentActor {
+  readonly id: string;
+  readonly name: string;
+  /** Foundry actor type — 'character' | 'npc' | 'loot' | 'vehicle' | 'hazard' | etc. */
+  readonly type: string;
+  readonly level?: number;
+  readonly folder?: string;
+}
+
+export interface WorldContentScene {
+  readonly id: string;
+  readonly name: string;
+  /** Whether this scene is the currently-viewed/active scene. */
+  readonly active: boolean;
+  readonly folder?: string;
+}
+
+export interface WorldContentJournal {
+  readonly id: string;
+  readonly name: string;
+  readonly folder?: string;
+  readonly pageCount?: number;
+}
+
+export interface WorldContentItem {
+  readonly id: string;
+  readonly name: string;
+  /** Foundry item type — 'weapon' | 'armor' | 'consumable' | etc. */
+  readonly type: string;
+  readonly folder?: string;
+}
+
+export interface WorldContentModule {
+  /** Foundry manifest id — e.g. `pf2e.abomination-vaults`. */
+  readonly id: string;
+  readonly title: string;
+  readonly active: boolean;
+}
+
+export interface WorldContent {
+  readonly actors: readonly WorldContentActor[];
+  readonly scenes: readonly WorldContentScene[];
+  readonly journals: readonly WorldContentJournal[];
+  readonly items: readonly WorldContentItem[];
+  readonly modules: readonly WorldContentModule[];
+}
+
 export interface QueryContext {
   /** Currently-active scene ID in Foundry, or null if none. */
   readonly sceneId: string | null;
@@ -317,6 +381,16 @@ export interface QueryContext {
    * when no scene is active (even on up-to-date modules).
    */
   readonly sceneDimensions?: SceneDimensions | null;
+  /**
+   * V2 Phase 4 — Module-Aware Napoleon. Compact summaries of the
+   * Foundry world's actors, scenes, journals, items, and installed
+   * modules so Napoleon can reference existing content by NAME instead
+   * of hallucinating duplicates. Populated by the module on every
+   * `client.query` when a Foundry session is connected; null/omitted
+   * for non-Foundry callers (dashboard chat, etc.). See WorldContent
+   * for the full shape.
+   */
+  readonly worldContent?: WorldContent | null;
   /** IDs of actors currently selected by the GM. */
   readonly selectedActorIds: readonly string[];
   /** Whether the combat tracker is open and in an active combat. */
@@ -1193,9 +1267,96 @@ function validateQueryContext(
       );
     }
   }
+  // worldContent is optional (V2 Phase 4). When present + not null, all
+  // five summary arrays must exist with the correct entry shapes.
+  // Module-side enumeration enforces the per-type soft caps; the
+  // protocol layer only checks structure.
+  if ("worldContent" in ctx && ctx.worldContent !== undefined && ctx.worldContent !== null) {
+    validateWorldContent(ctx.worldContent, correlationId);
+  }
   assert(isStringArray(ctx.selectedActorIds), "context.selectedActorIds", "string array", correlationId);
   assert(typeof ctx.inCombat === "boolean", "context.inCombat", "boolean", correlationId);
   assert(isStringArray(ctx.recentChat), "context.recentChat", "string array", correlationId);
+}
+
+function validateWorldContent(
+  value: unknown,
+  correlationId: string
+): asserts value is WorldContent {
+  assert(isPlainObject(value), "context.worldContent", "an object", correlationId);
+  const wc = value;
+
+  assert(Array.isArray(wc.actors), "context.worldContent.actors", "array", correlationId);
+  for (let i = 0; i < (wc.actors as unknown[]).length; i++) {
+    const a = (wc.actors as unknown[])[i];
+    assert(isPlainObject(a), `context.worldContent.actors[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString((a as Record<string, unknown>).id), `context.worldContent.actors[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString((a as Record<string, unknown>).name), `context.worldContent.actors[${i}].name`, "non-empty string", correlationId);
+    assert(isNonEmptyString((a as Record<string, unknown>).type), `context.worldContent.actors[${i}].type`, "non-empty string", correlationId);
+    if ("level" in (a as Record<string, unknown>) && (a as Record<string, unknown>).level !== undefined) {
+      assert(
+        typeof (a as Record<string, unknown>).level === "number" && Number.isFinite((a as Record<string, unknown>).level as number),
+        `context.worldContent.actors[${i}].level`,
+        "finite number when present",
+        correlationId
+      );
+    }
+    if ("folder" in (a as Record<string, unknown>) && (a as Record<string, unknown>).folder !== undefined) {
+      assert(typeof (a as Record<string, unknown>).folder === "string", `context.worldContent.actors[${i}].folder`, "string when present", correlationId);
+    }
+  }
+
+  assert(Array.isArray(wc.scenes), "context.worldContent.scenes", "array", correlationId);
+  for (let i = 0; i < (wc.scenes as unknown[]).length; i++) {
+    const s = (wc.scenes as unknown[])[i];
+    assert(isPlainObject(s), `context.worldContent.scenes[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString((s as Record<string, unknown>).id), `context.worldContent.scenes[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString((s as Record<string, unknown>).name), `context.worldContent.scenes[${i}].name`, "non-empty string", correlationId);
+    assert(typeof (s as Record<string, unknown>).active === "boolean", `context.worldContent.scenes[${i}].active`, "boolean", correlationId);
+    if ("folder" in (s as Record<string, unknown>) && (s as Record<string, unknown>).folder !== undefined) {
+      assert(typeof (s as Record<string, unknown>).folder === "string", `context.worldContent.scenes[${i}].folder`, "string when present", correlationId);
+    }
+  }
+
+  assert(Array.isArray(wc.journals), "context.worldContent.journals", "array", correlationId);
+  for (let i = 0; i < (wc.journals as unknown[]).length; i++) {
+    const j = (wc.journals as unknown[])[i];
+    assert(isPlainObject(j), `context.worldContent.journals[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString((j as Record<string, unknown>).id), `context.worldContent.journals[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString((j as Record<string, unknown>).name), `context.worldContent.journals[${i}].name`, "non-empty string", correlationId);
+    if ("folder" in (j as Record<string, unknown>) && (j as Record<string, unknown>).folder !== undefined) {
+      assert(typeof (j as Record<string, unknown>).folder === "string", `context.worldContent.journals[${i}].folder`, "string when present", correlationId);
+    }
+    if ("pageCount" in (j as Record<string, unknown>) && (j as Record<string, unknown>).pageCount !== undefined) {
+      assert(
+        typeof (j as Record<string, unknown>).pageCount === "number" && Number.isFinite((j as Record<string, unknown>).pageCount as number),
+        `context.worldContent.journals[${i}].pageCount`,
+        "finite number when present",
+        correlationId
+      );
+    }
+  }
+
+  assert(Array.isArray(wc.items), "context.worldContent.items", "array", correlationId);
+  for (let i = 0; i < (wc.items as unknown[]).length; i++) {
+    const it = (wc.items as unknown[])[i];
+    assert(isPlainObject(it), `context.worldContent.items[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString((it as Record<string, unknown>).id), `context.worldContent.items[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString((it as Record<string, unknown>).name), `context.worldContent.items[${i}].name`, "non-empty string", correlationId);
+    assert(isNonEmptyString((it as Record<string, unknown>).type), `context.worldContent.items[${i}].type`, "non-empty string", correlationId);
+    if ("folder" in (it as Record<string, unknown>) && (it as Record<string, unknown>).folder !== undefined) {
+      assert(typeof (it as Record<string, unknown>).folder === "string", `context.worldContent.items[${i}].folder`, "string when present", correlationId);
+    }
+  }
+
+  assert(Array.isArray(wc.modules), "context.worldContent.modules", "array", correlationId);
+  for (let i = 0; i < (wc.modules as unknown[]).length; i++) {
+    const m = (wc.modules as unknown[])[i];
+    assert(isPlainObject(m), `context.worldContent.modules[${i}]`, "an object", correlationId);
+    assert(isNonEmptyString((m as Record<string, unknown>).id), `context.worldContent.modules[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString((m as Record<string, unknown>).title), `context.worldContent.modules[${i}].title`, "non-empty string", correlationId);
+    assert(typeof (m as Record<string, unknown>).active === "boolean", `context.worldContent.modules[${i}].active`, "boolean", correlationId);
+  }
 }
 
 function validateQuerySnapshot(

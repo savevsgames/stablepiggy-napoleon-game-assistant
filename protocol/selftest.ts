@@ -35,6 +35,7 @@ import type {
   BackendWallCreatePayload,
   BackendLightCreatePayload,
   BackendSceneUpdatePayload,
+  WorldContent,
 } from "./index.js";
 
 // ============================================================================
@@ -126,6 +127,31 @@ function validQueryPayload(): ClientQueryPayload {
       inCombat: false,
       recentChat: [],
     },
+  };
+}
+
+function validWorldContent(): WorldContent {
+  return {
+    actors: [
+      { id: "actor-1", name: "Drowned Guard", type: "npc", level: 2, folder: "Chapter 2" },
+      { id: "actor-2", name: "GM Notes", type: "loot" },
+    ],
+    scenes: [
+      { id: "scene-1", name: "A1 — Gauntlight Keep", active: true, folder: "Chapter 1" },
+      { id: "scene-2", name: "B3 — The Drowned Hall", active: false },
+    ],
+    journals: [
+      { id: "journal-1", name: "Chapter 1 Overview", folder: "Chapter 1", pageCount: 4 },
+      { id: "journal-2", name: "Errata Notes" },
+    ],
+    items: [
+      { id: "item-1", name: "+1 Striking Rapier", type: "weapon" },
+      { id: "item-2", name: "Healing Potion", type: "consumable", folder: "Loot" },
+    ],
+    modules: [
+      { id: "pf2e.abomination-vaults", title: "Pathfinder Adventure Path: Abomination Vaults", active: true },
+      { id: "pf2e", title: "Pathfinder 2e", active: true },
+    ],
   };
 }
 
@@ -320,6 +346,105 @@ section("client.query");
     makeMessage("client.query", {
       ...badContext,
       context: { ...badContext.context, selectedActorIds: "not-an-array" as unknown as readonly string[] },
+    }),
+    "validation_failed"
+  );
+
+  // V2 Phase 4 — worldContent
+  const queryWithWorld = validQueryPayload();
+  assertAccepts(
+    "valid query with populated worldContent",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: { ...queryWithWorld.context, worldContent: validWorldContent() },
+    })
+  );
+  assertAccepts(
+    "valid query with worldContent: null (no Foundry session)",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: { ...queryWithWorld.context, worldContent: null },
+    })
+  );
+  assertAccepts(
+    "valid query with empty worldContent arrays",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: { actors: [], scenes: [], journals: [], items: [], modules: [] },
+      },
+    })
+  );
+  assertRejects(
+    "rejects worldContent.actors with missing id",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: {
+          ...validWorldContent(),
+          actors: [{ name: "Nameless", type: "npc" } as unknown as WorldContent["actors"][number]],
+        },
+      },
+    }),
+    "validation_failed"
+  );
+  assertRejects(
+    "rejects worldContent.actors with non-numeric level",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: {
+          ...validWorldContent(),
+          actors: [{ id: "a1", name: "Bad Level", type: "npc", level: "two" as unknown as number }],
+        },
+      },
+    }),
+    "validation_failed"
+  );
+  assertRejects(
+    "rejects worldContent.scenes with non-boolean active",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: {
+          ...validWorldContent(),
+          scenes: [{ id: "s1", name: "Bad Active", active: "yes" as unknown as boolean }],
+        },
+      },
+    }),
+    "validation_failed"
+  );
+  assertRejects(
+    "rejects worldContent missing the journals array",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: {
+          actors: [],
+          scenes: [],
+          items: [],
+          modules: [],
+        } as unknown as WorldContent,
+      },
+    }),
+    "validation_failed"
+  );
+  assertRejects(
+    "rejects worldContent.modules with missing title",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: {
+          ...validWorldContent(),
+          modules: [{ id: "pf2e.av", active: true } as unknown as WorldContent["modules"][number]],
+        },
+      },
     }),
     "validation_failed"
   );
