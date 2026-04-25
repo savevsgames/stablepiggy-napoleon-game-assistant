@@ -86,6 +86,7 @@ import type { RelayClient } from "./relay-client.js";
 import { info, warn, error as logError, debug } from "./log.js";
 import { captureViewportSnapshot } from "./snapshot.js";
 import { listWorldFiles } from "./world-files.js";
+import { buildWorldContent } from "./world-content.js";
 
 const MODULE_ID = "stablepiggy-napoleon-game-assistant";
 
@@ -338,6 +339,15 @@ async function handleNapoleonQuery(
         gridSize: activeDims.size,
       }
     : null;
+
+  // V2 Phase 4: Module-Aware Napoleon. Enumerate compact summaries of
+  // game.actors / scenes / journal / items / modules so the backend can
+  // render a "## Current world contents" block in Napoleon's user
+  // message. Per-type caps from spec §10 Q4 are applied inside
+  // buildWorldContent. Returns null pre-ready; null is the "no Foundry
+  // session" signal the backend treats as "skip block injection."
+  const worldContent = buildWorldContent();
+
   const queryId = client.sendQuery({
     sessionId,
     query,
@@ -345,6 +355,7 @@ async function handleNapoleonQuery(
       sceneId: activeScene?.id ?? null,
       sceneName: activeScene?.name ?? null,
       sceneDimensions,
+      ...(worldContent ? { worldContent } : {}),
       selectedActorIds: [],
       inCombat: false,
       recentChat: [],
