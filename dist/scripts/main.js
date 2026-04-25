@@ -834,6 +834,58 @@ function getFolderName$1(doc) {
 function packKey(pack) {
   return pack.metadata?.id ?? pack.collection ?? void 0;
 }
+function extractJournal(j, out) {
+  if (typeof j.id !== "string" || !j.id) return;
+  if (typeof j.name !== "string" || !j.name) return;
+  const pages = [];
+  for (const p of j.pages) {
+    if (typeof p.id !== "string" || !p.id) continue;
+    if (typeof p.name !== "string" || !p.name) continue;
+    pages.push({
+      id: p.id,
+      name: p.name,
+      contentHtml: p.text?.content ?? "",
+      sort: typeof p.sort === "number" && Number.isFinite(p.sort) ? p.sort : 0
+    });
+  }
+  const folder = getFolderName$1(j);
+  out.push({
+    id: j.id,
+    name: j.name,
+    ...folder ? { folder } : {},
+    pages: pages.sort((a, b) => a.sort - b.sort)
+  });
+}
+function extractItem(it, out) {
+  if (typeof it.id !== "string" || !it.id) return;
+  if (typeof it.name !== "string" || !it.name) return;
+  if (typeof it.type !== "string" || !it.type) return;
+  const description = it.system?.description?.value;
+  const folder = getFolderName$1(it);
+  out.push({
+    id: it.id,
+    name: it.name,
+    type: it.type,
+    ...typeof description === "string" && description.length > 0 ? { descriptionHtml: description } : {},
+    ...folder ? { folder } : {}
+  });
+}
+function extractScene(s, versionManifestId, out) {
+  if (typeof s.id !== "string" || !s.id) return;
+  if (typeof s.name !== "string" || !s.name) return;
+  let description;
+  const directFlag = s.flags?.[versionManifestId];
+  if (directFlag && typeof directFlag.description === "string" && directFlag.description.length > 0) {
+    description = directFlag.description;
+  }
+  const folder = getFolderName$1(s);
+  out.push({
+    id: s.id,
+    name: s.name,
+    ...description ? { description } : {},
+    ...folder ? { folder } : {}
+  });
+}
 async function enumerateAdventureContent(opts) {
   const journals = [];
   const items = [];
@@ -857,61 +909,25 @@ async function enumerateAdventureContent(opts) {
   for (const pack of matchingPacks) {
     if (pack.documentName === "JournalEntry") {
       const docs = await pack.getDocuments();
-      for (const j of docs) {
-        if (typeof j.id !== "string" || !j.id) continue;
-        if (typeof j.name !== "string" || !j.name) continue;
-        const pages = [];
-        for (const p of j.pages) {
-          if (typeof p.id !== "string" || !p.id) continue;
-          if (typeof p.name !== "string" || !p.name) continue;
-          pages.push({
-            id: p.id,
-            name: p.name,
-            contentHtml: p.text?.content ?? "",
-            sort: typeof p.sort === "number" && Number.isFinite(p.sort) ? p.sort : 0
-          });
-        }
-        const folder = getFolderName$1(j);
-        journals.push({
-          id: j.id,
-          name: j.name,
-          ...folder ? { folder } : {},
-          pages: pages.sort((a, b) => a.sort - b.sort)
-        });
-      }
+      for (const j of docs) extractJournal(j, journals);
     } else if (pack.documentName === "Item") {
       const docs = await pack.getDocuments();
-      for (const it of docs) {
-        if (typeof it.id !== "string" || !it.id) continue;
-        if (typeof it.name !== "string" || !it.name) continue;
-        if (typeof it.type !== "string" || !it.type) continue;
-        const description = it.system?.description?.value;
-        const folder = getFolderName$1(it);
-        items.push({
-          id: it.id,
-          name: it.name,
-          type: it.type,
-          ...typeof description === "string" && description.length > 0 ? { descriptionHtml: description } : {},
-          ...folder ? { folder } : {}
-        });
-      }
+      for (const it of docs) extractItem(it, items);
     } else if (pack.documentName === "Scene") {
       const docs = await pack.getDocuments();
-      for (const s of docs) {
-        if (typeof s.id !== "string" || !s.id) continue;
-        if (typeof s.name !== "string" || !s.name) continue;
-        let description;
-        const directFlag = s.flags?.[opts.versionManifestId];
-        if (directFlag && typeof directFlag.description === "string" && directFlag.description.length > 0) {
-          description = directFlag.description;
+      for (const s of docs) extractScene(s, opts.versionManifestId, scenes);
+    } else if (pack.documentName === "Adventure") {
+      const docs = await pack.getDocuments();
+      for (const adv of docs) {
+        if (adv.journal) {
+          for (const j of adv.journal) extractJournal(j, journals);
         }
-        const folder = getFolderName$1(s);
-        scenes.push({
-          id: s.id,
-          name: s.name,
-          ...description ? { description } : {},
-          ...folder ? { folder } : {}
-        });
+        if (adv.items) {
+          for (const it of adv.items) extractItem(it, items);
+        }
+        if (adv.scenes) {
+          for (const s of adv.scenes) extractScene(s, opts.versionManifestId, scenes);
+        }
       }
     }
   }

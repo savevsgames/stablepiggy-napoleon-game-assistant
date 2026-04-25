@@ -13,6 +13,14 @@
  * subpack inside the pf2e system module — not in the AV module
  * itself. See `local/specs/FOUNDRY-MODULE-INGESTION-SPEC.md` L10/L15.
  *
+ * Pack-document-type dispatch: Foundry V13 ships AP content as
+ * `documentName: "Adventure"` packs — a single wrapper document with
+ * embedded `journal`/`items`/`scenes`/`actors` collections. The
+ * Adventure branch unpacks those embedded collections and feeds them
+ * through the same per-doc extractors as plain JournalEntry/Item/
+ * Scene packs. Older modules that ship loose-document packs (one
+ * pack each per type) still work via the original branches.
+ *
  * Sequential enumeration only (NOT Promise.all across packs) per
  * spec §7.2 implementation constraint #1: parallel `getDocuments()`
  * calls would spike client memory and freeze the GM's browser tab
@@ -63,6 +71,17 @@ interface FoundrySceneDoc extends FoundryDocument {
   readonly flags?: Record<string, { readonly description?: string } | undefined>;
 }
 
+/**
+ * Foundry V13 Adventure document (the wrapper Paizo ships AV as).
+ * The four embedded collections are `Collection<Document>` instances —
+ * iterable, but we only need the for-of contract here.
+ */
+interface FoundryAdventureDoc extends FoundryDocument {
+  readonly journal?: { [Symbol.iterator](): IterableIterator<FoundryJournalEntry> };
+  readonly items?: { [Symbol.iterator](): IterableIterator<FoundryItemDoc> };
+  readonly scenes?: { [Symbol.iterator](): IterableIterator<FoundrySceneDoc> };
+}
+
 interface FoundryPack {
   readonly metadata?: {
     readonly id?: string;
@@ -94,6 +113,69 @@ function getFolderName(doc: FoundryDocument): string | undefined {
 
 function packKey(pack: FoundryPack): string | undefined {
   return pack.metadata?.id ?? pack.collection ?? undefined;
+}
+
+function extractJournal(j: FoundryJournalEntry, out: ModuleJournalEntry[]): void {
+  if (typeof j.id !== "string" || !j.id) return;
+  if (typeof j.name !== "string" || !j.name) return;
+  const pages: ModuleJournalPage[] = [];
+  for (const p of j.pages) {
+    if (typeof p.id !== "string" || !p.id) continue;
+    if (typeof p.name !== "string" || !p.name) continue;
+    pages.push({
+      id: p.id,
+      name: p.name,
+      contentHtml: p.text?.content ?? "",
+      sort: typeof p.sort === "number" && Number.isFinite(p.sort) ? p.sort : 0,
+    });
+  }
+  const folder = getFolderName(j);
+  out.push({
+    id: j.id,
+    name: j.name,
+    ...(folder ? { folder } : {}),
+    pages: pages.sort((a, b) => a.sort - b.sort),
+  });
+}
+
+function extractItem(it: FoundryItemDoc, out: ModuleItem[]): void {
+  if (typeof it.id !== "string" || !it.id) return;
+  if (typeof it.name !== "string" || !it.name) return;
+  if (typeof it.type !== "string" || !it.type) return;
+  const description = it.system?.description?.value;
+  const folder = getFolderName(it);
+  out.push({
+    id: it.id,
+    name: it.name,
+    type: it.type,
+    ...(typeof description === "string" && description.length > 0
+      ? { descriptionHtml: description }
+      : {}),
+    ...(folder ? { folder } : {}),
+  });
+}
+
+function extractScene(
+  s: FoundrySceneDoc,
+  versionManifestId: string,
+  out: ModuleSceneSummary[],
+): void {
+  if (typeof s.id !== "string" || !s.id) return;
+  if (typeof s.name !== "string" || !s.name) return;
+  // Best-effort scene description scrape — module-specific flag
+  // namespaces vary; try the version manifest's namespace first.
+  let description: string | undefined;
+  const directFlag = s.flags?.[versionManifestId];
+  if (directFlag && typeof directFlag.description === "string" && directFlag.description.length > 0) {
+    description = directFlag.description;
+  }
+  const folder = getFolderName(s);
+  out.push({
+    id: s.id,
+    name: s.name,
+    ...(description ? { description } : {}),
+    ...(folder ? { folder } : {}),
+  });
 }
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -163,72 +245,39 @@ export async function enumerateAdventureContent(
   for (const pack of matchingPacks) {
     if (pack.documentName === "JournalEntry") {
       const docs = (await pack.getDocuments()) as readonly FoundryJournalEntry[];
-      for (const j of docs) {
-        if (typeof j.id !== "string" || !j.id) continue;
-        if (typeof j.name !== "string" || !j.name) continue;
-        const pages: ModuleJournalPage[] = [];
-        for (const p of j.pages) {
-          if (typeof p.id !== "string" || !p.id) continue;
-          if (typeof p.name !== "string" || !p.name) continue;
-          pages.push({
-            id: p.id,
-            name: p.name,
-            contentHtml: p.text?.content ?? "",
-            sort: typeof p.sort === "number" && Number.isFinite(p.sort) ? p.sort : 0,
-          });
-        }
-        const folder = getFolderName(j);
-        journals.push({
-          id: j.id,
-          name: j.name,
-          ...(folder ? { folder } : {}),
-          pages: pages.sort((a, b) => a.sort - b.sort),
-        });
-      }
+      for (const j of docs) extractJournal(j, journals);
     } else if (pack.documentName === "Item") {
       const docs = (await pack.getDocuments()) as readonly FoundryItemDoc[];
-      for (const it of docs) {
-        if (typeof it.id !== "string" || !it.id) continue;
-        if (typeof it.name !== "string" || !it.name) continue;
-        if (typeof it.type !== "string" || !it.type) continue;
-        const description = it.system?.description?.value;
-        const folder = getFolderName(it);
-        items.push({
-          id: it.id,
-          name: it.name,
-          type: it.type,
-          ...(typeof description === "string" && description.length > 0
-            ? { descriptionHtml: description }
-            : {}),
-          ...(folder ? { folder } : {}),
-        });
-      }
+      for (const it of docs) extractItem(it, items);
     } else if (pack.documentName === "Scene") {
       const docs = (await pack.getDocuments()) as readonly FoundrySceneDoc[];
-      for (const s of docs) {
-        if (typeof s.id !== "string" || !s.id) continue;
-        if (typeof s.name !== "string" || !s.name) continue;
-        // Best-effort scene description scrape — module-specific
-        // flag namespaces vary; try the version manifest's namespace
-        // first, then fall back to any flag bag with a description.
-        let description: string | undefined;
-        const directFlag = s.flags?.[opts.versionManifestId];
-        if (directFlag && typeof directFlag.description === "string" && directFlag.description.length > 0) {
-          description = directFlag.description;
+      for (const s of docs) extractScene(s, opts.versionManifestId, scenes);
+    } else if (pack.documentName === "Adventure") {
+      // Paizo's Adventure Path packs (and Foundry V13 Adventure
+      // packs in general) ship a SINGLE Adventure document that
+      // wraps embedded journal/items/scenes/actors collections.
+      // Walk the embedded collections directly — same shape as the
+      // top-level pack branches above, just one indirection deeper.
+      // Skips `.actors` per L7 scope (no NPC stat blocks).
+      const docs = (await pack.getDocuments()) as readonly FoundryAdventureDoc[];
+      for (const adv of docs) {
+        if (adv.journal) {
+          for (const j of adv.journal) extractJournal(j, journals);
         }
-        const folder = getFolderName(s);
-        scenes.push({
-          id: s.id,
-          name: s.name,
-          ...(description ? { description } : {}),
-          ...(folder ? { folder } : {}),
-        });
+        if (adv.items) {
+          for (const it of adv.items) extractItem(it, items);
+        }
+        if (adv.scenes) {
+          for (const s of adv.scenes) extractScene(s, opts.versionManifestId, scenes);
+        }
       }
     }
-    // Other document types in matched packs (Macros, RollTables, etc.)
-    // are intentionally skipped — out of scope per spec L7. Future
-    // commits can extend this dispatch as new content types are added
-    // to the ingestion scope.
+    // Other document types in matched packs (Macros, RollTables,
+    // Actor, etc.) are intentionally skipped — out of scope per spec
+    // L7. The bestiary subpack (documentName="Actor") falls through
+    // here without contributing content. Future commits can extend
+    // this dispatch as new content types are added to the ingestion
+    // scope.
   }
 
   const version = game.modules.get(opts.versionManifestId)?.version ?? "unknown";
