@@ -101,6 +101,8 @@ export type MessageKind =
   | "client.data_upload_ack"
   | "client.world_save_request"
   | "client.module_content.response"
+  | "client.adventure_ingestion_request"
+  | "client.adventure_ingestion_decline_request"
   | "backend.chat.create"
   | "backend.actor.create"
   | "backend.actor.update"
@@ -1088,6 +1090,46 @@ export interface ClientModuleContentResponsePayload {
   };
 }
 
+// ============================================================================
+// V2 Phase 4 Commit 5d — Adventure Ingestion consent flow (chat-button driven)
+// ============================================================================
+
+/**
+ * Module → backend — fired by the GM clicking the "Yes Ingest" button
+ * in the consent message Napoleon surfaced. Triggers the full
+ * ingestion chain: backend creates a task, returns commands including
+ * `backend.module_content.request` (Commit 5b) which kicks the
+ * compendium walk; module enumerates and replies with
+ * `client.module_content.response`; relay forwards to backend's
+ * `/my/foundry/module-ingest` (Commit 5c); backend ingests + writes
+ * knowledge rows.
+ *
+ * Buttons live in `chat-buttons.ts`'s click handler; payload fields
+ * come from the button's `data-adventure-id` + `data-campaign-id`
+ * attributes the backend rendered into the consent message HTML.
+ */
+export interface ClientAdventureIngestionRequestPayload {
+  readonly correlationId: string;
+  /** Adventure key from `KNOWN_APS` (e.g. `"abomination-vaults"`). */
+  readonly adventureId: string;
+  /** Campaign id the GM clicked the button under. */
+  readonly campaignId: string;
+}
+
+/**
+ * Module → backend — fired by the GM clicking "Not now" on the
+ * consent message. Backend writes
+ * `foundry_campaigns.module_ingestion_declined_at = now()` so
+ * subsequent /napoleon queries don't re-prompt for 30 days. The GM
+ * can re-surface the offer at any time by saying "re-offer
+ * ingestion" in chat (Commit 5d classifier intent).
+ */
+export interface ClientAdventureIngestionDeclineRequestPayload {
+  readonly correlationId: string;
+  readonly adventureId: string;
+  readonly campaignId: string;
+}
+
 /**
  * Payload for `error`. Sent by either side to report a structured error.
  * The relay uses this to forward validation failures and auth errors back
@@ -1148,6 +1190,10 @@ export type ClientWorldSaveRequestMessage = BaseMessage<"client.world_save_reque
 export type BackendModuleContentRequestMessage = BaseMessage<"backend.module_content.request", BackendModuleContentRequestPayload>;
 /** `client.module_content.response` — module → relay → backend, full enumerated AP content for Trough ingestion (V2 Phase 4 Commit 5b). */
 export type ClientModuleContentResponseMessage = BaseMessage<"client.module_content.response", ClientModuleContentResponsePayload>;
+/** `client.adventure_ingestion_request` — module → relay → backend, "Yes Ingest" button click fires this (V2 Phase 4 Commit 5d). */
+export type ClientAdventureIngestionRequestMessage = BaseMessage<"client.adventure_ingestion_request", ClientAdventureIngestionRequestPayload>;
+/** `client.adventure_ingestion_decline_request` — module → relay → backend, "Not now" button click fires this (V2 Phase 4 Commit 5d). */
+export type ClientAdventureIngestionDeclineRequestMessage = BaseMessage<"client.adventure_ingestion_decline_request", ClientAdventureIngestionDeclineRequestPayload>;
 /** `ping` — both directions, keep-alive probe. */
 export type PingMessage = BaseMessage<"ping", PingPayload>;
 /** `pong` — both directions, response to ping. */
@@ -1179,6 +1225,8 @@ export type ProtocolMessage =
   | ClientWorldSaveRequestMessage
   | BackendModuleContentRequestMessage
   | ClientModuleContentResponseMessage
+  | ClientAdventureIngestionRequestMessage
+  | ClientAdventureIngestionDeclineRequestMessage
   | PingMessage
   | PongMessage
   | ErrorMessage;
@@ -2108,6 +2156,19 @@ function validateClientModuleContentResponsePayload(
   }
 }
 
+/**
+ * Shared validator for the two consent-flow payloads — both have the
+ * same shape (correlationId + adventureId + campaignId).
+ */
+function validateAdventureConsentPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(isNonEmptyString(payload.correlationId), "payload.correlationId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.adventureId), "payload.adventureId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.campaignId), "payload.campaignId", "non-empty string", correlationId);
+}
+
 function validateWorldSaveRequestPayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -2272,6 +2333,12 @@ export function validateMessage(input: unknown): ProtocolMessage {
       break;
     case "client.module_content.response":
       validateClientModuleContentResponsePayload(payload, id);
+      break;
+    case "client.adventure_ingestion_request":
+      validateAdventureConsentPayload(payload, id);
+      break;
+    case "client.adventure_ingestion_decline_request":
+      validateAdventureConsentPayload(payload, id);
       break;
     case "ping":
       // PingPayload is empty — no further validation needed.

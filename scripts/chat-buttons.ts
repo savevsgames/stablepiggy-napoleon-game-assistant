@@ -54,6 +54,10 @@ declare const ui: {
 const SEND_ATTR = "data-napoleon-send";
 const PREFILL_ATTR = "data-napoleon-prefill";
 const WORLD_SAVE_ATTR = "data-napoleon-world-save";
+/** V2 Phase 4 Commit 5d — `data-napoleon-action="ingest-adventure" | "decline-adventure-ingestion"`. */
+const ACTION_ATTR = "data-napoleon-action";
+const ACTION_INGEST = "ingest-adventure";
+const ACTION_DECLINE = "decline-adventure-ingestion";
 const WIRED_FLAG = "napoleonWired";
 
 // Module-level ref to the relay client so world-save buttons can send
@@ -72,7 +76,7 @@ export function registerChatButtonHandlers(client: RelayClient): void {
 
 function wireButtons(root: HTMLElement): void {
   const buttons = root.querySelectorAll<HTMLElement>(
-    `[${SEND_ATTR}], [${PREFILL_ATTR}], [${WORLD_SAVE_ATTR}]`,
+    `[${SEND_ATTR}], [${PREFILL_ATTR}], [${WORLD_SAVE_ATTR}], [${ACTION_ATTR}]`,
   );
   if (buttons.length === 0) return;
   buttons.forEach((btn) => {
@@ -107,6 +111,12 @@ async function handleClick(btn: HTMLElement): Promise<void> {
 
   if (btn.hasAttribute(WORLD_SAVE_ATTR)) {
     await handleWorldSaveClick(btn);
+    return;
+  }
+
+  const action = btn.getAttribute(ACTION_ATTR);
+  if (action === ACTION_INGEST || action === ACTION_DECLINE) {
+    handleAdventureConsentClick(btn, action);
     return;
   }
 
@@ -209,5 +219,68 @@ async function handleWorldSaveClick(btn: HTMLElement): Promise<void> {
 
   if (msgId === null) {
     ui.notifications.error("Save to World: relay is not connected.");
+  }
+}
+
+/**
+ * V2 Phase 4 Commit 5d — handle clicks on the AP ingestion consent
+ * buttons. Reads `data-adventure-id` + `data-campaign-id`, fires the
+ * matching protocol message, disables the button briefly so a panicky
+ * GM doesn't double-click. Both buttons are fire-and-forget; the
+ * backend's response comes back as `backend.chat.create` messages
+ * dispatched by the normal handler.
+ */
+function handleAdventureConsentClick(btn: HTMLElement, action: string): void {
+  if (!relayClientRef) {
+    logError("napoleon-action click but relayClientRef is unset");
+    ui.notifications.error("Adventure ingestion: module not fully initialized yet. Try again.");
+    return;
+  }
+
+  const adventureId = btn.getAttribute("data-adventure-id");
+  const campaignId = btn.getAttribute("data-campaign-id");
+
+  if (!adventureId || !campaignId) {
+    logError(
+      `napoleon-action="${action}" click missing required data-* attrs (adventureId=${adventureId}, campaignId=${campaignId})`,
+    );
+    ui.notifications.error("Adventure ingestion: button is malformed (missing data attributes).");
+    return;
+  }
+
+  // Disable both buttons briefly so the GM can't double-click. We
+  // disable EVERY data-napoleon-action button in the same chat
+  // message so accept/decline are mutually exclusive — once the GM
+  // makes a choice, both options visibly resolve.
+  const message = btn.closest(".chat-message, .message") as HTMLElement | null;
+  const peers = message
+    ? message.querySelectorAll<HTMLButtonElement>(`button[${ACTION_ATTR}]`)
+    : ([btn as HTMLButtonElement] as unknown as NodeListOf<HTMLButtonElement>);
+  peers.forEach((p) => {
+    p.disabled = true;
+  });
+
+  if (action === ACTION_INGEST) {
+    debug(`napoleon-action="ingest-adventure" click → adventureId=${adventureId}, campaignId=${campaignId}`);
+    const msgId = relayClientRef.sendAdventureIngestionRequest({ adventureId, campaignId });
+    if (msgId === null) {
+      ui.notifications.error("Adventure ingestion: relay is not connected.");
+      peers.forEach((p) => {
+        p.disabled = false;
+      });
+    }
+    return;
+  }
+
+  if (action === ACTION_DECLINE) {
+    debug(`napoleon-action="decline-adventure-ingestion" click → adventureId=${adventureId}, campaignId=${campaignId}`);
+    const msgId = relayClientRef.sendAdventureIngestionDeclineRequest({ adventureId, campaignId });
+    if (msgId === null) {
+      ui.notifications.error("Adventure ingestion: relay is not connected.");
+      peers.forEach((p) => {
+        p.disabled = false;
+      });
+    }
+    return;
   }
 }

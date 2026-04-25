@@ -84,6 +84,7 @@
 import {
   PROTOCOL_VERSION,
   makeMessage,
+  makeMessageId,
   validateMessage,
   ProtocolError,
   type ProtocolMessage,
@@ -477,6 +478,59 @@ export class RelayClient {
   }
 
   /**
+   * V2 Phase 4 Commit 5d — fire `client.adventure_ingestion_request`
+   * when the GM clicks "Yes Ingest" on the consent message. Backend
+   * resolves the AP from registry, returns commands that include
+   * `backend.module_content.request` (the existing handler in this
+   * client kicks the enumeration). Fire-and-forget; the response is
+   * a separate inbound `backend.chat.create` (handled by the normal
+   * dispatcher).
+   */
+  sendAdventureIngestionRequest(payload: {
+    adventureId: string;
+    campaignId: string;
+  }): string | null {
+    if (this.status !== "connected" || !this.socket) {
+      warn(`sendAdventureIngestionRequest called while status=${this.status} — dropping`);
+      return null;
+    }
+    const msg = makeMessage("client.adventure_ingestion_request", {
+      correlationId: makeMessageId(),
+      adventureId: payload.adventureId,
+      campaignId: payload.campaignId,
+    });
+    this.socket.send(JSON.stringify(msg));
+    debug(`→ client.adventure_ingestion_request (adventureId=${payload.adventureId})`);
+    return msg.id;
+  }
+
+  /**
+   * V2 Phase 4 Commit 5d — fire
+   * `client.adventure_ingestion_decline_request` when the GM clicks
+   * "Not now" on the consent message. Backend writes
+   * `module_ingestion_declined_at` so the prompt doesn't re-surface
+   * for 30 days. Returns immediately; the relay handles the decline
+   * server-side and may issue a `backend.chat.create` confirmation.
+   */
+  sendAdventureIngestionDeclineRequest(payload: {
+    adventureId: string;
+    campaignId: string;
+  }): string | null {
+    if (this.status !== "connected" || !this.socket) {
+      warn(`sendAdventureIngestionDeclineRequest called while status=${this.status} — dropping`);
+      return null;
+    }
+    const msg = makeMessage("client.adventure_ingestion_decline_request", {
+      correlationId: makeMessageId(),
+      adventureId: payload.adventureId,
+      campaignId: payload.campaignId,
+    });
+    this.socket.send(JSON.stringify(msg));
+    debug(`→ client.adventure_ingestion_decline_request (adventureId=${payload.adventureId})`);
+    return msg.id;
+  }
+
+  /**
    * Send a `client.session_event` to the relay. Fire-and-forget — session
    * events are buffered relay-side and flushed in batches. Returns the
    * message id on success, null if not connected.
@@ -631,6 +685,8 @@ export class RelayClient {
       case "client.data_upload_ack":
       case "client.world_save_request":
       case "client.module_content.response":
+      case "client.adventure_ingestion_request":
+      case "client.adventure_ingestion_decline_request":
         warn(
           `received ${message.kind} from relay — this kind is client→relay only`
         );

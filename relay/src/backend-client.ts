@@ -457,6 +457,137 @@ export async function forwardModuleContentToBackend(
   return parsed;
 }
 
+// ── Adventure consent forwards (V2 Phase 4 Commit 5d) ──────────────────
+
+/**
+ * Backend's response shape for the consent-flow endpoints. Both
+ * accept-ingest and decline endpoints return a `commands` list the
+ * relay iterates and pushes via WebSocket — same pattern as the
+ * existing `/my/foundry/world-save` and `/my/foundry/query` flows.
+ */
+export interface AdventureConsentResponse {
+  readonly commands: ReadonlyArray<{
+    readonly kind: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+  }>;
+}
+
+interface AdventureConsentForwardPayload {
+  readonly correlationId: string;
+  readonly adventureId: string;
+  readonly campaignId: string;
+}
+
+async function forwardAdventureConsent(
+  endpointSuffix: "/adventure-ingest-request" | "/adventure-decline",
+  connection: ConnectionState,
+  payload: AdventureConsentForwardPayload,
+  messageId: string,
+  config: Config,
+  log: Logger,
+): Promise<AdventureConsentResponse> {
+  if (!connection.identityId || !connection.worldId) {
+    throw new Error(
+      "connection state missing identityId/worldId — client.hello was not completed",
+    );
+  }
+
+  if (!config.backendUrl) {
+    throw new Error(
+      "backend URL is not configured — cannot forward adventure consent",
+    );
+  }
+
+  const url = config.backendUrl.replace(/\/query$/, endpointSuffix);
+  if (url === config.backendUrl) {
+    throw new Error(
+      `cannot derive ${endpointSuffix} URL: backendUrl does not end with /query (got "${config.backendUrl}")`,
+    );
+  }
+
+  const body = {
+    worldId: connection.worldId,
+    identityId: connection.identityId,
+    correlationId: payload.correlationId,
+    adventureId: payload.adventureId,
+    campaignId: payload.campaignId,
+  };
+
+  const startedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Authorization: `Bearer ${config.backendToken}`,
+        "X-Correlation-Id": messageId,
+        "X-Relay-Version": RELAY_VERSION,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown fetch error";
+    throw new Error(`adventure-consent backend unreachable (${endpointSuffix}): ${msg}`);
+  }
+
+  const durationMs = Date.now() - startedAt;
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "<unreadable>");
+    throw new Error(
+      `adventure-consent backend HTTP ${response.status} in ${durationMs}ms (${endpointSuffix}): ${text.slice(0, 200)}`,
+    );
+  }
+
+  const parsed = (await response.json()) as AdventureConsentResponse;
+  log.debug(
+    {
+      messageId,
+      endpoint: endpointSuffix,
+      adventureId: payload.adventureId,
+      commandCount: parsed.commands.length,
+      durationMs,
+    },
+    "adventure-consent backend responded",
+  );
+  return parsed;
+}
+
+export function forwardAdventureIngestionRequest(
+  connection: ConnectionState,
+  payload: AdventureConsentForwardPayload,
+  messageId: string,
+  config: Config,
+  log: Logger,
+): Promise<AdventureConsentResponse> {
+  return forwardAdventureConsent(
+    "/adventure-ingest-request",
+    connection,
+    payload,
+    messageId,
+    config,
+    log,
+  );
+}
+
+export function forwardAdventureIngestionDecline(
+  connection: ConnectionState,
+  payload: AdventureConsentForwardPayload,
+  messageId: string,
+  config: Config,
+  log: Logger,
+): Promise<AdventureConsentResponse> {
+  return forwardAdventureConsent(
+    "/adventure-decline",
+    connection,
+    payload,
+    messageId,
+    config,
+    log,
+  );
+}
+
 // ── Identity resolution (M2.1) ──────────────────────────────────────────
 //
 // When a GM authenticates with a StablePiggy API key (any `authToken` in

@@ -62,6 +62,8 @@ import {
   forwardQueryToBackend,
   forwardWorldSaveToBackend,
   forwardModuleContentToBackend,
+  forwardAdventureIngestionRequest,
+  forwardAdventureIngestionDecline,
   resolveIdentityFromApiKey,
 } from "./backend-client.js";
 import {
@@ -262,6 +264,12 @@ async function handleMessage(
         break;
       case "client.world_save_request":
         await handleWorldSaveRequest(state, message, config, log);
+        break;
+      case "client.adventure_ingestion_request":
+        await handleAdventureIngestionRequest(state, message, config, log);
+        break;
+      case "client.adventure_ingestion_decline_request":
+        await handleAdventureIngestionDecline(state, message, config, log);
         break;
       case "client.module_content.response":
         // V2 Phase 4 Commit 5c — forward to backend's
@@ -667,6 +675,107 @@ async function handleWorldSaveRequest(
       `world-save failed: ${msg}`,
       message.id
     );
+  }
+}
+
+// V2 Phase 4 Commit 5d — adventure ingestion consent handlers.
+//
+// Both messages forward to a backend HTTP endpoint and iterate the
+// returned commands list back over the WebSocket — same pattern as
+// handleWorldSaveRequest. The "Yes Ingest" handler kicks the full
+// ingestion chain (backend returns chat.create + backend.module_content
+// .request commands; module's existing handler enumerates and replies
+// with client.module_content.response which Commit 5c wired). The
+// "Not now" handler writes module_ingestion_declined_at server-side
+// and returns a chat.create confirmation.
+
+async function handleAdventureIngestionRequest(
+  state: ConnectionState,
+  message: import("@stablepiggy-napoleon/protocol").ClientAdventureIngestionRequestMessage,
+  config: Config,
+  log: Logger,
+): Promise<void> {
+  if (!state.helloCompleted) {
+    log.warn({ messageId: message.id }, "rejected adventure-ingestion-request on hello-less connection");
+    sendError(state, "validation_failed", "client.hello required before client.adventure_ingestion_request", message.id);
+    return;
+  }
+  try {
+    const response = await forwardAdventureIngestionRequest(
+      state,
+      {
+        correlationId: message.payload.correlationId,
+        adventureId: message.payload.adventureId,
+        campaignId: message.payload.campaignId,
+      },
+      message.id,
+      config,
+      log,
+    );
+    for (const command of response.commands) {
+      const wrapped = makeMessage(
+        command.kind as Parameters<typeof makeMessage>[0],
+        command.payload as never,
+      );
+      sendMessage(state, wrapped);
+    }
+    log.info(
+      {
+        messageId: message.id,
+        adventureId: message.payload.adventureId,
+        commandCount: response.commands.length,
+      },
+      "adventure-ingestion-request processed",
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown backend error";
+    log.error({ err: msg, messageId: message.id }, "adventure-ingestion-request forwarding failed");
+    sendError(state, "backend_unreachable", `adventure-ingestion-request failed: ${msg}`, message.id);
+  }
+}
+
+async function handleAdventureIngestionDecline(
+  state: ConnectionState,
+  message: import("@stablepiggy-napoleon/protocol").ClientAdventureIngestionDeclineRequestMessage,
+  config: Config,
+  log: Logger,
+): Promise<void> {
+  if (!state.helloCompleted) {
+    log.warn({ messageId: message.id }, "rejected adventure-decline on hello-less connection");
+    sendError(state, "validation_failed", "client.hello required before client.adventure_ingestion_decline_request", message.id);
+    return;
+  }
+  try {
+    const response = await forwardAdventureIngestionDecline(
+      state,
+      {
+        correlationId: message.payload.correlationId,
+        adventureId: message.payload.adventureId,
+        campaignId: message.payload.campaignId,
+      },
+      message.id,
+      config,
+      log,
+    );
+    for (const command of response.commands) {
+      const wrapped = makeMessage(
+        command.kind as Parameters<typeof makeMessage>[0],
+        command.payload as never,
+      );
+      sendMessage(state, wrapped);
+    }
+    log.info(
+      {
+        messageId: message.id,
+        adventureId: message.payload.adventureId,
+        commandCount: response.commands.length,
+      },
+      "adventure-decline processed",
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown backend error";
+    log.error({ err: msg, messageId: message.id }, "adventure-decline forwarding failed");
+    sendError(state, "backend_unreachable", `adventure-decline failed: ${msg}`, message.id);
   }
 }
 

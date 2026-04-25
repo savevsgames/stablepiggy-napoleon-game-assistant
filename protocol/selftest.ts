@@ -37,6 +37,8 @@ import type {
   BackendSceneUpdatePayload,
   BackendModuleContentRequestPayload,
   ClientModuleContentResponsePayload,
+  ClientAdventureIngestionRequestPayload,
+  ClientAdventureIngestionDeclineRequestPayload,
   WorldContent,
 } from "./index.js";
 
@@ -704,6 +706,68 @@ section("client.module_content.response (V2 Phase 4 Commit 5b)");
     makeMessage("client.module_content.response", {
       ...validModuleContentResponsePayload(),
       items: [{ id: "i1", name: "Mystery Item" } as unknown as ClientModuleContentResponsePayload["items"][number]],
+    }),
+    "validation_failed"
+  );
+}
+
+function validAdventureIngestionRequest(): ClientAdventureIngestionRequestPayload {
+  return {
+    correlationId: "ingest-button-1",
+    adventureId: "abomination-vaults",
+    campaignId: "savevsgreg-av",
+  };
+}
+
+function validAdventureIngestionDecline(): ClientAdventureIngestionDeclineRequestPayload {
+  return {
+    correlationId: "decline-button-1",
+    adventureId: "abomination-vaults",
+    campaignId: "savevsgreg-av",
+  };
+}
+
+section("client.adventure_ingestion_request (V2 Phase 4 Commit 5d)");
+{
+  assertAccepts(
+    "valid adventure_ingestion_request",
+    makeMessage("client.adventure_ingestion_request", validAdventureIngestionRequest())
+  );
+
+  assertRejects(
+    "rejects with empty adventureId",
+    makeMessage("client.adventure_ingestion_request", { ...validAdventureIngestionRequest(), adventureId: "" }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects with missing campaignId",
+    makeMessage("client.adventure_ingestion_request", {
+      correlationId: "c1",
+      adventureId: "abomination-vaults",
+    } as unknown as ClientAdventureIngestionRequestPayload),
+    "validation_failed"
+  );
+}
+
+section("client.adventure_ingestion_decline_request (V2 Phase 4 Commit 5d)");
+{
+  assertAccepts(
+    "valid adventure_ingestion_decline_request",
+    makeMessage("client.adventure_ingestion_decline_request", validAdventureIngestionDecline())
+  );
+
+  assertRejects(
+    "rejects with empty correlationId",
+    makeMessage("client.adventure_ingestion_decline_request", { ...validAdventureIngestionDecline(), correlationId: "" }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects with non-string campaignId",
+    makeMessage("client.adventure_ingestion_decline_request", {
+      ...validAdventureIngestionDecline(),
+      campaignId: 42 as unknown as string,
     }),
     "validation_failed"
   );
