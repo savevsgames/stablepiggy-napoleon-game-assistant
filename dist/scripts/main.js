@@ -177,6 +177,9 @@ function validateWorldContent(value, correlationId) {
     assert(isNonEmptyString(m.id), `context.worldContent.modules[${i}].id`, "non-empty string", correlationId);
     assert(isNonEmptyString(m.title), `context.worldContent.modules[${i}].title`, "non-empty string", correlationId);
     assert(typeof m.active === "boolean", `context.worldContent.modules[${i}].active`, "boolean", correlationId);
+    if ("version" in m && m.version !== void 0) {
+      assert(typeof m.version === "string", `context.worldContent.modules[${i}].version`, "string when present", correlationId);
+    }
   }
 }
 function validateQuerySnapshot(value, correlationId) {
@@ -451,6 +454,82 @@ function validateDataUploadPayload(payload, correlationId) {
 const SLUG_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const VALID_TARGET_TYPES = /* @__PURE__ */ new Set(["actor", "scene", "token", "journal", "save_only"]);
 const VALID_TARGET_ACTIONS = /* @__PURE__ */ new Set(["create", "update"]);
+function validateBackendModuleContentRequestPayload(payload, correlationId) {
+  assert(isNonEmptyString(payload.correlationId), "payload.correlationId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.adventureId), "payload.adventureId", "non-empty string", correlationId);
+  assert(Array.isArray(payload.packKeys), "payload.packKeys", "array", correlationId);
+  const packKeys = payload.packKeys;
+  assert(packKeys.length > 0, "payload.packKeys.length", "non-empty array", correlationId);
+  for (let i = 0; i < packKeys.length; i++) {
+    assert(isNonEmptyString(packKeys[i]), `payload.packKeys[${i}]`, "non-empty string", correlationId);
+  }
+  assert(isNonEmptyString(payload.versionManifestId), "payload.versionManifestId", "non-empty string", correlationId);
+}
+function validateClientModuleContentResponsePayload(payload, correlationId) {
+  assert(isNonEmptyString(payload.correlationId), "payload.correlationId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.adventureId), "payload.adventureId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.version), "payload.version", "non-empty string", correlationId);
+  assert(Array.isArray(payload.journals), "payload.journals", "array", correlationId);
+  for (let i = 0; i < payload.journals.length; i++) {
+    const j = payload.journals[i];
+    assert(isPlainObject(j), `payload.journals[${i}]`, "an object", correlationId);
+    const jr = j;
+    assert(isNonEmptyString(jr.id), `payload.journals[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(jr.name), `payload.journals[${i}].name`, "non-empty string", correlationId);
+    if ("folder" in jr && jr.folder !== void 0) {
+      assert(typeof jr.folder === "string", `payload.journals[${i}].folder`, "string when present", correlationId);
+    }
+    assert(Array.isArray(jr.pages), `payload.journals[${i}].pages`, "array", correlationId);
+    for (let k = 0; k < jr.pages.length; k++) {
+      const p = jr.pages[k];
+      assert(isPlainObject(p), `payload.journals[${i}].pages[${k}]`, "an object", correlationId);
+      const pr = p;
+      assert(isNonEmptyString(pr.id), `payload.journals[${i}].pages[${k}].id`, "non-empty string", correlationId);
+      assert(isNonEmptyString(pr.name), `payload.journals[${i}].pages[${k}].name`, "non-empty string", correlationId);
+      assert(typeof pr.contentHtml === "string", `payload.journals[${i}].pages[${k}].contentHtml`, "string", correlationId);
+      assert(typeof pr.sort === "number" && Number.isFinite(pr.sort), `payload.journals[${i}].pages[${k}].sort`, "finite number", correlationId);
+    }
+  }
+  assert(Array.isArray(payload.items), "payload.items", "array", correlationId);
+  for (let i = 0; i < payload.items.length; i++) {
+    const it = payload.items[i];
+    assert(isPlainObject(it), `payload.items[${i}]`, "an object", correlationId);
+    const ir = it;
+    assert(isNonEmptyString(ir.id), `payload.items[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(ir.name), `payload.items[${i}].name`, "non-empty string", correlationId);
+    assert(isNonEmptyString(ir.type), `payload.items[${i}].type`, "non-empty string", correlationId);
+    if ("descriptionHtml" in ir && ir.descriptionHtml !== void 0) {
+      assert(typeof ir.descriptionHtml === "string", `payload.items[${i}].descriptionHtml`, "string when present", correlationId);
+    }
+    if ("folder" in ir && ir.folder !== void 0) {
+      assert(typeof ir.folder === "string", `payload.items[${i}].folder`, "string when present", correlationId);
+    }
+  }
+  assert(Array.isArray(payload.scenes), "payload.scenes", "array", correlationId);
+  for (let i = 0; i < payload.scenes.length; i++) {
+    const s = payload.scenes[i];
+    assert(isPlainObject(s), `payload.scenes[${i}]`, "an object", correlationId);
+    const sr = s;
+    assert(isNonEmptyString(sr.id), `payload.scenes[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(sr.name), `payload.scenes[${i}].name`, "non-empty string", correlationId);
+    if ("description" in sr && sr.description !== void 0) {
+      assert(typeof sr.description === "string", `payload.scenes[${i}].description`, "string when present", correlationId);
+    }
+    if ("folder" in sr && sr.folder !== void 0) {
+      assert(typeof sr.folder === "string", `payload.scenes[${i}].folder`, "string when present", correlationId);
+    }
+  }
+  assert(isPlainObject(payload.counts), "payload.counts", "an object", correlationId);
+  const counts = payload.counts;
+  for (const field of ["journalEntries", "journalPages", "items", "scenes"]) {
+    assert(typeof counts[field] === "number" && Number.isFinite(counts[field]) && counts[field] >= 0, `payload.counts.${field}`, "non-negative finite number", correlationId);
+  }
+}
+function validateAdventureConsentPayload(payload, correlationId) {
+  assert(isNonEmptyString(payload.correlationId), "payload.correlationId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.adventureId), "payload.adventureId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.campaignId), "payload.campaignId", "non-empty string", correlationId);
+}
 function validateWorldSaveRequestPayload(payload, correlationId) {
   if ("correlationId" in payload && payload.correlationId !== void 0) {
     assert(typeof payload.correlationId === "string", "payload.correlationId", "string when present", correlationId);
@@ -538,6 +617,18 @@ function validateMessage(input) {
       break;
     case "client.world_save_request":
       validateWorldSaveRequestPayload(payload, id);
+      break;
+    case "backend.module_content.request":
+      validateBackendModuleContentRequestPayload(payload, id);
+      break;
+    case "client.module_content.response":
+      validateClientModuleContentResponsePayload(payload, id);
+      break;
+    case "client.adventure_ingestion_request":
+      validateAdventureConsentPayload(payload, id);
+      break;
+    case "client.adventure_ingestion_decline_request":
+      validateAdventureConsentPayload(payload, id);
       break;
     case "ping":
       break;
@@ -735,6 +826,108 @@ function basename(path) {
   if (idx < 0) return path;
   return path.slice(idx + 1);
 }
+function getFolderName$1(doc) {
+  const f = doc.folder;
+  if (!f) return void 0;
+  return typeof f.name === "string" && f.name.length > 0 ? f.name : void 0;
+}
+function packKey(pack) {
+  return pack.metadata?.id ?? pack.collection ?? void 0;
+}
+async function enumerateAdventureContent(opts) {
+  const journals = [];
+  const items = [];
+  const scenes = [];
+  const packKeySet = new Set(opts.packKeys);
+  const matchingPacks = Array.from(game.packs).filter((pack) => {
+    const key = packKey(pack);
+    return key !== void 0 && packKeySet.has(key);
+  });
+  if (matchingPacks.length === 0) {
+    const version2 = game.modules.get(opts.versionManifestId)?.version ?? "unknown";
+    return { journals, items, scenes, version: version2 };
+  }
+  try {
+    await ChatMessage.create({
+      whisper: [game.user.id],
+      content: "<p><em>Napoleon: reading module content — this takes a moment for large adventures.</em></p>"
+    });
+  } catch {
+  }
+  for (const pack of matchingPacks) {
+    if (pack.documentName === "JournalEntry") {
+      const docs = await pack.getDocuments();
+      for (const j of docs) {
+        if (typeof j.id !== "string" || !j.id) continue;
+        if (typeof j.name !== "string" || !j.name) continue;
+        const pages = [];
+        for (const p of j.pages) {
+          if (typeof p.id !== "string" || !p.id) continue;
+          if (typeof p.name !== "string" || !p.name) continue;
+          pages.push({
+            id: p.id,
+            name: p.name,
+            contentHtml: p.text?.content ?? "",
+            sort: typeof p.sort === "number" && Number.isFinite(p.sort) ? p.sort : 0
+          });
+        }
+        const folder = getFolderName$1(j);
+        journals.push({
+          id: j.id,
+          name: j.name,
+          ...folder ? { folder } : {},
+          pages: pages.sort((a, b) => a.sort - b.sort)
+        });
+      }
+    } else if (pack.documentName === "Item") {
+      const docs = await pack.getDocuments();
+      for (const it of docs) {
+        if (typeof it.id !== "string" || !it.id) continue;
+        if (typeof it.name !== "string" || !it.name) continue;
+        if (typeof it.type !== "string" || !it.type) continue;
+        const description = it.system?.description?.value;
+        const folder = getFolderName$1(it);
+        items.push({
+          id: it.id,
+          name: it.name,
+          type: it.type,
+          ...typeof description === "string" && description.length > 0 ? { descriptionHtml: description } : {},
+          ...folder ? { folder } : {}
+        });
+      }
+    } else if (pack.documentName === "Scene") {
+      const docs = await pack.getDocuments();
+      for (const s of docs) {
+        if (typeof s.id !== "string" || !s.id) continue;
+        if (typeof s.name !== "string" || !s.name) continue;
+        let description;
+        const directFlag = s.flags?.[opts.versionManifestId];
+        if (directFlag && typeof directFlag.description === "string" && directFlag.description.length > 0) {
+          description = directFlag.description;
+        }
+        const folder = getFolderName$1(s);
+        scenes.push({
+          id: s.id,
+          name: s.name,
+          ...description ? { description } : {},
+          ...folder ? { folder } : {}
+        });
+      }
+    }
+  }
+  const version = game.modules.get(opts.versionManifestId)?.version ?? "unknown";
+  return { journals, items, scenes, version };
+}
+function summarizeCounts(content) {
+  let journalPages = 0;
+  for (const j of content.journals) journalPages += j.pages.length;
+  return {
+    journalEntries: content.journals.length,
+    journalPages,
+    items: content.items.length,
+    scenes: content.scenes.length
+  };
+}
 function escapeHtml$1(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
@@ -872,6 +1065,51 @@ class RelayClient {
     return msg.id;
   }
   /**
+   * V2 Phase 4 Commit 5d — fire `client.adventure_ingestion_request`
+   * when the GM clicks "Yes Ingest" on the consent message. Backend
+   * resolves the AP from registry, returns commands that include
+   * `backend.module_content.request` (the existing handler in this
+   * client kicks the enumeration). Fire-and-forget; the response is
+   * a separate inbound `backend.chat.create` (handled by the normal
+   * dispatcher).
+   */
+  sendAdventureIngestionRequest(payload) {
+    if (this.status !== "connected" || !this.socket) {
+      warn(`sendAdventureIngestionRequest called while status=${this.status} — dropping`);
+      return null;
+    }
+    const msg = makeMessage("client.adventure_ingestion_request", {
+      correlationId: makeMessageId(),
+      adventureId: payload.adventureId,
+      campaignId: payload.campaignId
+    });
+    this.socket.send(JSON.stringify(msg));
+    debug(`→ client.adventure_ingestion_request (adventureId=${payload.adventureId})`);
+    return msg.id;
+  }
+  /**
+   * V2 Phase 4 Commit 5d — fire
+   * `client.adventure_ingestion_decline_request` when the GM clicks
+   * "Not now" on the consent message. Backend writes
+   * `module_ingestion_declined_at` so the prompt doesn't re-surface
+   * for 30 days. Returns immediately; the relay handles the decline
+   * server-side and may issue a `backend.chat.create` confirmation.
+   */
+  sendAdventureIngestionDeclineRequest(payload) {
+    if (this.status !== "connected" || !this.socket) {
+      warn(`sendAdventureIngestionDeclineRequest called while status=${this.status} — dropping`);
+      return null;
+    }
+    const msg = makeMessage("client.adventure_ingestion_decline_request", {
+      correlationId: makeMessageId(),
+      adventureId: payload.adventureId,
+      campaignId: payload.campaignId
+    });
+    this.socket.send(JSON.stringify(msg));
+    debug(`→ client.adventure_ingestion_decline_request (adventureId=${payload.adventureId})`);
+    return msg.id;
+  }
+  /**
    * Send a `client.session_event` to the relay. Fire-and-forget — session
    * events are buffered relay-side and flushed in batches. Returns the
    * message id on success, null if not connected.
@@ -994,6 +1232,9 @@ class RelayClient {
       case "backend.data.upload":
         void this.handleDataUpload(message.payload, message.id);
         break;
+      case "backend.module_content.request":
+        void this.handleModuleContentRequest(message.payload);
+        break;
       case "error":
         warn(
           `relay sent error (code=${message.payload.code}): ${message.payload.message}`
@@ -1010,6 +1251,9 @@ class RelayClient {
       case "client.session_event":
       case "client.data_upload_ack":
       case "client.world_save_request":
+      case "client.module_content.response":
+      case "client.adventure_ingestion_request":
+      case "client.adventure_ingestion_decline_request":
         warn(
           `received ${message.kind} from relay — this kind is client→relay only`
         );
@@ -1960,6 +2204,69 @@ class RelayClient {
     const msg = makeMessage("client.data_upload_ack", payload);
     this.socket.send(JSON.stringify(msg));
   }
+  /**
+   * V2 Phase 4 Commit 5b — handle backend's request to enumerate an
+   * Adventure Path's compendium pack contents for Trough ingestion.
+   * Sequential pack walk + GM whisper happen inside
+   * `enumerateAdventureContent`. The response goes back as a single
+   * `client.module_content.response` frame with the request's
+   * correlationId echoed.
+   *
+   * On enumeration failure: send a `client.module_content.response`
+   * with empty arrays + zero counts so the backend correlator
+   * resolves rather than timing out, and log the underlying error
+   * via `logError` so the GM-side issue is recoverable.
+   */
+  async handleModuleContentRequest(payload) {
+    const { correlationId, adventureId, packKeys, versionManifestId } = payload;
+    info(
+      `handleModuleContentRequest: enumerating adventureId="${adventureId}" packKeys=${JSON.stringify(packKeys)} versionManifestId="${versionManifestId}"`
+    );
+    try {
+      const content = await enumerateAdventureContent({ packKeys, versionManifestId });
+      const counts = summarizeCounts(content);
+      info(
+        `handleModuleContentRequest: enumerated adventureId="${adventureId}" version=${content.version} ${JSON.stringify(counts)}`
+      );
+      if (this.status !== "connected" || !this.socket) {
+        warn(
+          `handleModuleContentRequest: connection lost mid-enumeration (status=${this.status}); response dropped for correlationId=${correlationId}`
+        );
+        return;
+      }
+      const response = makeMessage("client.module_content.response", {
+        correlationId,
+        adventureId,
+        journals: content.journals,
+        items: content.items,
+        scenes: content.scenes,
+        version: content.version,
+        counts
+      });
+      this.socket.send(JSON.stringify(response));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error(
+        `handleModuleContentRequest threw for adventureId="${adventureId}": ${msg}`,
+        err
+      );
+      if (this.status === "connected" && this.socket) {
+        try {
+          const fallback = makeMessage("client.module_content.response", {
+            correlationId,
+            adventureId,
+            journals: [],
+            items: [],
+            scenes: [],
+            version: "unknown",
+            counts: { journalEntries: 0, journalPages: 0, items: 0, scenes: 0 }
+          });
+          this.socket.send(JSON.stringify(fallback));
+        } catch {
+        }
+      }
+    }
+  }
   // ── Timers ──────────────────────────────────────────────────────────
   startPingLoop() {
     if (this.pingTimer) return;
@@ -2215,7 +2522,13 @@ function enumerateModules() {
     const id = typeof mod.id === "string" && mod.id ? mod.id : key;
     if (typeof id !== "string" || !id) continue;
     if (typeof mod.title !== "string" || !mod.title) continue;
-    out.push({ id, title: mod.title, active: mod.active === true });
+    const version = typeof mod.version === "string" && mod.version.length > 0 ? mod.version : void 0;
+    out.push({
+      id,
+      title: mod.title,
+      active: mod.active === true,
+      ...version ? { version } : {}
+    });
     if (out.length >= CAPS.modules) break;
   }
   return out;
@@ -2375,6 +2688,9 @@ function escapeHtml(s) {
 const SEND_ATTR = "data-napoleon-send";
 const PREFILL_ATTR = "data-napoleon-prefill";
 const WORLD_SAVE_ATTR = "data-napoleon-world-save";
+const ACTION_ATTR = "data-napoleon-action";
+const ACTION_INGEST = "ingest-adventure";
+const ACTION_DECLINE = "decline-adventure-ingestion";
 const WIRED_FLAG = "napoleonWired";
 let relayClientRef = null;
 function registerChatButtonHandlers(client) {
@@ -2388,7 +2704,7 @@ function registerChatButtonHandlers(client) {
 }
 function wireButtons(root) {
   const buttons = root.querySelectorAll(
-    `[${SEND_ATTR}], [${PREFILL_ATTR}], [${WORLD_SAVE_ATTR}]`
+    `[${SEND_ATTR}], [${PREFILL_ATTR}], [${WORLD_SAVE_ATTR}], [${ACTION_ATTR}]`
   );
   if (buttons.length === 0) return;
   buttons.forEach((btn) => {
@@ -2421,6 +2737,11 @@ async function handleClick(btn) {
   }
   if (btn.hasAttribute(WORLD_SAVE_ATTR)) {
     await handleWorldSaveClick(btn);
+    return;
+  }
+  const action = btn.getAttribute(ACTION_ATTR);
+  if (action === ACTION_INGEST || action === ACTION_DECLINE) {
+    handleAdventureConsentClick(btn, action);
     return;
   }
   const prefill = btn.getAttribute(PREFILL_ATTR);
@@ -2498,6 +2819,49 @@ async function handleWorldSaveClick(btn) {
   });
   if (msgId === null) {
     ui.notifications.error("Save to World: relay is not connected.");
+  }
+}
+function handleAdventureConsentClick(btn, action) {
+  if (!relayClientRef) {
+    error("napoleon-action click but relayClientRef is unset");
+    ui.notifications.error("Adventure ingestion: module not fully initialized yet. Try again.");
+    return;
+  }
+  const adventureId = btn.getAttribute("data-adventure-id");
+  const campaignId = btn.getAttribute("data-campaign-id");
+  if (!adventureId || !campaignId) {
+    error(
+      `napoleon-action="${action}" click missing required data-* attrs (adventureId=${adventureId}, campaignId=${campaignId})`
+    );
+    ui.notifications.error("Adventure ingestion: button is malformed (missing data attributes).");
+    return;
+  }
+  const message = btn.closest(".chat-message, .message");
+  const peers = message ? message.querySelectorAll(`button[${ACTION_ATTR}]`) : [btn];
+  peers.forEach((p) => {
+    p.disabled = true;
+  });
+  if (action === ACTION_INGEST) {
+    debug(`napoleon-action="ingest-adventure" click → adventureId=${adventureId}, campaignId=${campaignId}`);
+    const msgId = relayClientRef.sendAdventureIngestionRequest({ adventureId, campaignId });
+    if (msgId === null) {
+      ui.notifications.error("Adventure ingestion: relay is not connected.");
+      peers.forEach((p) => {
+        p.disabled = false;
+      });
+    }
+    return;
+  }
+  if (action === ACTION_DECLINE) {
+    debug(`napoleon-action="decline-adventure-ingestion" click → adventureId=${adventureId}, campaignId=${campaignId}`);
+    const msgId = relayClientRef.sendAdventureIngestionDeclineRequest({ adventureId, campaignId });
+    if (msgId === null) {
+      ui.notifications.error("Adventure ingestion: relay is not connected.");
+      peers.forEach((p) => {
+        p.disabled = false;
+      });
+    }
+    return;
   }
 }
 const NAPOLEON_ALIASES = /* @__PURE__ */ new Set(["napoleon", "napoleon (m2 stub)"]);
