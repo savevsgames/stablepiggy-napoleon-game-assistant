@@ -356,6 +356,17 @@ export interface WorldContentModule {
   readonly id: string;
   readonly title: string;
   readonly active: boolean;
+  /**
+   * V2 Phase 4 Commit 5e — installed version string from
+   * `game.modules.get(id).version`. Optional for backward compat
+   * with module bundles that predate this commit; the backend's
+   * major-version-upgrade detection silently skips entries where
+   * version is missing or unparseable. Schema-shape: any string;
+   * format is whatever the module's manifest declares (commonly
+   * semver, but Paizo and others occasionally ship `"3.0"` or
+   * `"v2.1.0-beta"` or even `"2024.07"`).
+   */
+  readonly version?: string;
 }
 
 export interface WorldContent {
@@ -1533,6 +1544,16 @@ function validateWorldContent(
     assert(isNonEmptyString((m as Record<string, unknown>).id), `context.worldContent.modules[${i}].id`, "non-empty string", correlationId);
     assert(isNonEmptyString((m as Record<string, unknown>).title), `context.worldContent.modules[${i}].title`, "non-empty string", correlationId);
     assert(typeof (m as Record<string, unknown>).active === "boolean", `context.worldContent.modules[${i}].active`, "boolean", correlationId);
+    // V2 Phase 4 Commit 5e — version is optional. When present it
+    // must be a string; format is up to the module's manifest.
+    if ("version" in (m as Record<string, unknown>) && (m as Record<string, unknown>).version !== undefined) {
+      assert(
+        typeof (m as Record<string, unknown>).version === "string",
+        `context.worldContent.modules[${i}].version`,
+        "string when present",
+        correlationId,
+      );
+    }
   }
 }
 

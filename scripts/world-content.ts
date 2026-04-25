@@ -75,6 +75,8 @@ interface FoundryModule {
   readonly id?: string;
   readonly title?: string;
   readonly active?: boolean;
+  /** V2 Phase 4 Commit 5e — semver-ish module version from manifest. */
+  readonly version?: string;
 }
 
 interface FoundryCollection<T> {
@@ -228,7 +230,13 @@ function enumerateModules(): WorldContentModule[] {
     const id = typeof mod.id === "string" && mod.id ? mod.id : key;
     if (typeof id !== "string" || !id) continue;
     if (typeof mod.title !== "string" || !mod.title) continue;
-    out.push({ id, title: mod.title, active: mod.active === true });
+    const version = typeof mod.version === "string" && mod.version.length > 0 ? mod.version : undefined;
+    out.push({
+      id,
+      title: mod.title,
+      active: mod.active === true,
+      ...(version ? { version } : {}),
+    });
     if (out.length >= CAPS.modules) break;
   }
   return out;

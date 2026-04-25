@@ -153,7 +153,7 @@ function validWorldContent(): WorldContent {
       { id: "item-2", name: "Healing Potion", type: "consumable", folder: "Loot" },
     ],
     modules: [
-      { id: "pf2e.abomination-vaults", title: "Pathfinder Adventure Path: Abomination Vaults", active: true },
+      { id: "pf2e.abomination-vaults", title: "Pathfinder Adventure Path: Abomination Vaults", active: true, version: "2.1.0" },
       { id: "pf2e", title: "Pathfinder 2e", active: true },
     ],
   };
@@ -447,6 +447,47 @@ section("client.query");
         worldContent: {
           ...validWorldContent(),
           modules: [{ id: "pf2e.av", active: true } as unknown as WorldContent["modules"][number]],
+        },
+      },
+    }),
+    "validation_failed"
+  );
+  // V2 Phase 4 Commit 5e — module.version is optional but must be a string when present.
+  assertAccepts(
+    "valid worldContent with module.version present",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: {
+          ...validWorldContent(),
+          modules: [{ id: "pf2e.av", title: "AV", active: true, version: "3.0.0" }],
+        },
+      },
+    })
+  );
+  assertAccepts(
+    "valid worldContent with module.version omitted",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: {
+          ...validWorldContent(),
+          modules: [{ id: "pf2e.av", title: "AV", active: true }],
+        },
+      },
+    })
+  );
+  assertRejects(
+    "rejects worldContent.modules with non-string version",
+    makeMessage("client.query", {
+      ...queryWithWorld,
+      context: {
+        ...queryWithWorld.context,
+        worldContent: {
+          ...validWorldContent(),
+          modules: [{ id: "pf2e.av", title: "AV", active: true, version: 3 as unknown as string }],
         },
       },
     }),
