@@ -603,7 +603,13 @@ export interface BackendSceneCreatePayload {
 export interface BackendWallCreatePayload {
   /** The message ID of the originating client.query, if any. */
   readonly correlationId: string | null;
-  /** Endpoint coordinates [x1, y1, x2, y2] in scene pixels. */
+  /**
+   * Endpoint coordinates [x1, y1, x2, y2]. Interpretation depends on
+   * `coordMode`: "image" (default) = image-local pixels with (0,0) at
+   * the visible image's top-left; module adds sceneX/sceneY offset.
+   * "scene" = raw absolute scene pixels including padding; module
+   * passes through unchanged.
+   */
   readonly c: readonly [number, number, number, number];
   /** Movement restriction: 0 = pass-through, 1 = blocks movement. */
   readonly move: number;
@@ -613,6 +619,14 @@ export interface BackendWallCreatePayload {
   readonly sound: number;
   /** Door type: 0 = plain wall, 1 = door, 2 = secret door. */
   readonly door: number;
+  /**
+   * Coordinate space for `c`. Default "image" — module adds the
+   * scene's image offset (`scene.dimensions.sceneX/sceneY`) before
+   * creating the Wall document, so Napoleon can reason about walls
+   * in image-local space without doing offset math. "scene" passes
+   * coords through unchanged (padding-inclusive absolute pixels).
+   */
+  readonly coordMode?: "image" | "scene";
   /** Target scene name (as given to `backend.scene.create`). Optional — default: active scene. */
   readonly sceneName?: string;
 }
@@ -631,13 +645,13 @@ export interface BackendWallCreatePayload {
 export interface BackendLightCreatePayload {
   /** The message ID of the originating client.query, if any. */
   readonly correlationId: string | null;
-  /** Light position X in scene pixels. */
+  /** Light position X. Interpretation depends on coordMode (default "image"). */
   readonly x: number;
-  /** Light position Y in scene pixels. */
+  /** Light position Y. Interpretation depends on coordMode (default "image"). */
   readonly y: number;
-  /** Outer dim-light radius in scene pixels (must be >= bright). */
+  /** Outer dim-light radius in pixels (unit-less; no offset transform). Must be >= bright. */
   readonly dim: number;
-  /** Inner bright-light radius in scene pixels (fully lit). */
+  /** Inner bright-light radius in pixels (fully lit). */
   readonly bright: number;
   /** Cone angle in degrees (0-360). Default: 360 (omnidirectional). */
   readonly angle?: number;
@@ -645,6 +659,12 @@ export interface BackendLightCreatePayload {
   readonly rotation?: number;
   /** Hex color string (e.g. "#ff8800"). Default/null: Foundry's white. */
   readonly color?: string | null;
+  /**
+   * Coordinate space for `x, y`. Default "image" — module adds
+   * sceneX/sceneY offset. "scene" = raw absolute scene pixels. See
+   * BackendWallCreatePayload.coordMode for the full convention.
+   */
+  readonly coordMode?: "image" | "scene";
   /** Target scene name. Optional — default: active scene. */
   readonly sceneName?: string;
 }
@@ -1420,6 +1440,14 @@ function validateWallCreatePayload(
   assert((payload.sense as number) <= 1, "payload.sense", "0 or 1", correlationId);
   assert((payload.sound as number) <= 1, "payload.sound", "0 or 1", correlationId);
   assert((payload.door as number) <= 2, "payload.door", "0, 1, or 2", correlationId);
+  if ("coordMode" in payload && payload.coordMode !== undefined) {
+    assert(
+      payload.coordMode === "image" || payload.coordMode === "scene",
+      "payload.coordMode",
+      "'image' or 'scene' when present",
+      correlationId
+    );
+  }
   if ("sceneName" in payload) {
     assert(typeof payload.sceneName === "string", "payload.sceneName", "string when present", correlationId);
   }
@@ -1472,6 +1500,14 @@ function validateLightCreatePayload(
       payload.color === null || typeof payload.color === "string",
       "payload.color",
       "string or null when present",
+      correlationId
+    );
+  }
+  if ("coordMode" in payload && payload.coordMode !== undefined) {
+    assert(
+      payload.coordMode === "image" || payload.coordMode === "scene",
+      "payload.coordMode",
+      "'image' or 'scene' when present",
       correlationId
     );
   }
