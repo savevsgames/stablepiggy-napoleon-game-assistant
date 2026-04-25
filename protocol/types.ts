@@ -100,6 +100,7 @@ export type MessageKind =
   | "client.session_event"
   | "client.data_upload_ack"
   | "client.world_save_request"
+  | "client.module_content.response"
   | "backend.chat.create"
   | "backend.actor.create"
   | "backend.actor.update"
@@ -111,6 +112,7 @@ export type MessageKind =
   | "backend.wall.create"
   | "backend.light.create"
   | "backend.data.upload"
+  | "backend.module_content.request"
   | "ping"
   | "pong"
   | "error";
@@ -965,6 +967,127 @@ export interface PongPayload {
   readonly pingId: string;
 }
 
+// ============================================================================
+// V2 Phase 4 Commit 5b — Module Journal Ingestion (request + response)
+// ============================================================================
+
+/**
+ * Backend → module — request enumeration of an Adventure Path's
+ * compendium pack contents (journals, items, scenes) so the backend
+ * can chunk + embed them into the GM's owner-scoped Trough.
+ *
+ * Pack-key-level granularity, NOT manifest-level — see spec L10/L15.
+ * The bestiary for AV lives at `pf2e.abomination-vaults-bestiary`
+ * which is a subpack of the `pf2e` system module, not the AV module.
+ *
+ * Module-side enumeration is sequential (one pack at a time) to keep
+ * the GM's Foundry tab responsive on AV-class adventures, and emits
+ * a "reading module content" GM-visible whisper before starting.
+ */
+export interface BackendModuleContentRequestPayload {
+  /** Logical adventure key — Trough scope, echoed back in response. */
+  readonly correlationId: string;
+  readonly adventureId: string;
+  /**
+   * Compendium pack keys (`<packageName>.<packName>` format) to
+   * enumerate. Comes from the AP's `contentPackKeys` in
+   * `mcp-server/src/foundry-ap-registry.ts`.
+   */
+  readonly packKeys: readonly string[];
+  /**
+   * Primary detection manifest ID (e.g. `pf2e-abomination-vaults`)
+   * used by the module to look up the AP's installed version via
+   * `game.modules.get(versionManifestId)?.version`. Captured back
+   * into `version` on the response and stored on
+   * `foundry_campaigns.module_ingested_version` for the major-update
+   * detection path.
+   */
+  readonly versionManifestId: string;
+}
+
+/**
+ * A single page within a JournalEntry document. Foundry V13 journals
+ * are entry-with-pages — each page has its own name + HTML body.
+ */
+export interface ModuleJournalPage {
+  readonly id: string;
+  readonly name: string;
+  /** HTML body from `JournalEntryPage.text.content`. May be empty. */
+  readonly contentHtml: string;
+  /** Sort key from `JournalEntryPage.sort`; lets the backend reconstruct page order. */
+  readonly sort: number;
+}
+
+/**
+ * One JournalEntry document with its pages enumerated.
+ */
+export interface ModuleJournalEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly folder?: string;
+  readonly pages: readonly ModuleJournalPage[];
+}
+
+/**
+ * One Item document. `descriptionHtml` is best-effort — system-
+ * specific schema (PF2e: `system.description.value`); modules that
+ * differ may produce empty descriptions, which the backend handles
+ * by ingesting the entry on name + type alone.
+ */
+export interface ModuleItem {
+  readonly id: string;
+  readonly name: string;
+  readonly type: string;
+  readonly descriptionHtml?: string;
+  readonly folder?: string;
+}
+
+/**
+ * One Scene summary. Names + folder only — background image refs
+ * intentionally NOT included (per spec L7 ingestion scope: scenes
+ * contribute name + description, not image content). Optional
+ * description is best-effort scraped from module-specific scene
+ * flags.
+ */
+export interface ModuleSceneSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly description?: string;
+  readonly folder?: string;
+}
+
+/**
+ * Module → backend — full enumeration response. Sent as a single
+ * frame after the module finishes walking all matching packs. Long-
+ * running on the module side (~10-30s for AV-class); the backend
+ * uses the existing task-decomposition chat-progress flow to keep
+ * the GM informed during the wait.
+ */
+export interface ClientModuleContentResponsePayload {
+  /** Echoes the request's `correlationId` so the backend correlates response → task. */
+  readonly correlationId: string;
+  /** Echoes the request's `adventureId`. */
+  readonly adventureId: string;
+  readonly journals: readonly ModuleJournalEntry[];
+  readonly items: readonly ModuleItem[];
+  readonly scenes: readonly ModuleSceneSummary[];
+  /**
+   * Version string from `game.modules.get(versionManifestId)?.version`,
+   * captured at enumeration time. Backend stores as
+   * `foundry_campaigns.module_ingested_version` for major-update
+   * detection. `"unknown"` when the module isn't installed (shouldn't
+   * happen during a valid ingestion request but defensive).
+   */
+  readonly version: string;
+  /** Pre-aggregated counts so the backend can log progress without re-walking. */
+  readonly counts: {
+    readonly journalEntries: number;
+    readonly journalPages: number;
+    readonly items: number;
+    readonly scenes: number;
+  };
+}
+
 /**
  * Payload for `error`. Sent by either side to report a structured error.
  * The relay uses this to forward validation failures and auth errors back
@@ -1021,6 +1144,10 @@ export type BackendDataUploadMessage = BaseMessage<"backend.data.upload", Backen
 export type ClientDataUploadAckMessage = BaseMessage<"client.data_upload_ack", ClientDataUploadAckPayload>;
 /** `client.world_save_request` — module → relay, triggers Barn→Data persist pipeline (relay forwards to backend HTTP). */
 export type ClientWorldSaveRequestMessage = BaseMessage<"client.world_save_request", ClientWorldSaveRequestPayload>;
+/** `backend.module_content.request` — backend → relay → module, request AP compendium-pack enumeration (V2 Phase 4 Commit 5b). */
+export type BackendModuleContentRequestMessage = BaseMessage<"backend.module_content.request", BackendModuleContentRequestPayload>;
+/** `client.module_content.response` — module → relay → backend, full enumerated AP content for Trough ingestion (V2 Phase 4 Commit 5b). */
+export type ClientModuleContentResponseMessage = BaseMessage<"client.module_content.response", ClientModuleContentResponsePayload>;
 /** `ping` — both directions, keep-alive probe. */
 export type PingMessage = BaseMessage<"ping", PingPayload>;
 /** `pong` — both directions, response to ping. */
@@ -1050,6 +1177,8 @@ export type ProtocolMessage =
   | BackendDataUploadMessage
   | ClientDataUploadAckMessage
   | ClientWorldSaveRequestMessage
+  | BackendModuleContentRequestMessage
+  | ClientModuleContentResponseMessage
   | PingMessage
   | PongMessage
   | ErrorMessage;
@@ -1872,6 +2001,113 @@ const SLUG_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const VALID_TARGET_TYPES = new Set<string>(["actor", "scene", "token", "journal", "save_only"]);
 const VALID_TARGET_ACTIONS = new Set<string>(["create", "update"]);
 
+function validateBackendModuleContentRequestPayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(isNonEmptyString(payload.correlationId), "payload.correlationId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.adventureId), "payload.adventureId", "non-empty string", correlationId);
+  assert(Array.isArray(payload.packKeys), "payload.packKeys", "array", correlationId);
+  const packKeys = payload.packKeys as unknown[];
+  assert(packKeys.length > 0, "payload.packKeys.length", "non-empty array", correlationId);
+  for (let i = 0; i < packKeys.length; i++) {
+    assert(
+      isNonEmptyString(packKeys[i]),
+      `payload.packKeys[${i}]`,
+      "non-empty string",
+      correlationId
+    );
+  }
+  assert(
+    isNonEmptyString(payload.versionManifestId),
+    "payload.versionManifestId",
+    "non-empty string",
+    correlationId
+  );
+}
+
+function validateClientModuleContentResponsePayload(
+  payload: Record<string, unknown>,
+  correlationId: string
+): void {
+  assert(isNonEmptyString(payload.correlationId), "payload.correlationId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.adventureId), "payload.adventureId", "non-empty string", correlationId);
+  assert(isNonEmptyString(payload.version), "payload.version", "non-empty string", correlationId);
+
+  // Journals — array of entry-with-pages
+  assert(Array.isArray(payload.journals), "payload.journals", "array", correlationId);
+  for (let i = 0; i < (payload.journals as unknown[]).length; i++) {
+    const j = (payload.journals as unknown[])[i];
+    assert(isPlainObject(j), `payload.journals[${i}]`, "an object", correlationId);
+    const jr = j as Record<string, unknown>;
+    assert(isNonEmptyString(jr.id), `payload.journals[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(jr.name), `payload.journals[${i}].name`, "non-empty string", correlationId);
+    if ("folder" in jr && jr.folder !== undefined) {
+      assert(typeof jr.folder === "string", `payload.journals[${i}].folder`, "string when present", correlationId);
+    }
+    assert(Array.isArray(jr.pages), `payload.journals[${i}].pages`, "array", correlationId);
+    for (let k = 0; k < (jr.pages as unknown[]).length; k++) {
+      const p = (jr.pages as unknown[])[k];
+      assert(isPlainObject(p), `payload.journals[${i}].pages[${k}]`, "an object", correlationId);
+      const pr = p as Record<string, unknown>;
+      assert(isNonEmptyString(pr.id), `payload.journals[${i}].pages[${k}].id`, "non-empty string", correlationId);
+      assert(isNonEmptyString(pr.name), `payload.journals[${i}].pages[${k}].name`, "non-empty string", correlationId);
+      assert(typeof pr.contentHtml === "string", `payload.journals[${i}].pages[${k}].contentHtml`, "string", correlationId);
+      assert(
+        typeof pr.sort === "number" && Number.isFinite(pr.sort),
+        `payload.journals[${i}].pages[${k}].sort`,
+        "finite number",
+        correlationId
+      );
+    }
+  }
+
+  // Items
+  assert(Array.isArray(payload.items), "payload.items", "array", correlationId);
+  for (let i = 0; i < (payload.items as unknown[]).length; i++) {
+    const it = (payload.items as unknown[])[i];
+    assert(isPlainObject(it), `payload.items[${i}]`, "an object", correlationId);
+    const ir = it as Record<string, unknown>;
+    assert(isNonEmptyString(ir.id), `payload.items[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(ir.name), `payload.items[${i}].name`, "non-empty string", correlationId);
+    assert(isNonEmptyString(ir.type), `payload.items[${i}].type`, "non-empty string", correlationId);
+    if ("descriptionHtml" in ir && ir.descriptionHtml !== undefined) {
+      assert(typeof ir.descriptionHtml === "string", `payload.items[${i}].descriptionHtml`, "string when present", correlationId);
+    }
+    if ("folder" in ir && ir.folder !== undefined) {
+      assert(typeof ir.folder === "string", `payload.items[${i}].folder`, "string when present", correlationId);
+    }
+  }
+
+  // Scenes
+  assert(Array.isArray(payload.scenes), "payload.scenes", "array", correlationId);
+  for (let i = 0; i < (payload.scenes as unknown[]).length; i++) {
+    const s = (payload.scenes as unknown[])[i];
+    assert(isPlainObject(s), `payload.scenes[${i}]`, "an object", correlationId);
+    const sr = s as Record<string, unknown>;
+    assert(isNonEmptyString(sr.id), `payload.scenes[${i}].id`, "non-empty string", correlationId);
+    assert(isNonEmptyString(sr.name), `payload.scenes[${i}].name`, "non-empty string", correlationId);
+    if ("description" in sr && sr.description !== undefined) {
+      assert(typeof sr.description === "string", `payload.scenes[${i}].description`, "string when present", correlationId);
+    }
+    if ("folder" in sr && sr.folder !== undefined) {
+      assert(typeof sr.folder === "string", `payload.scenes[${i}].folder`, "string when present", correlationId);
+    }
+  }
+
+  // Counts
+  assert(isPlainObject(payload.counts), "payload.counts", "an object", correlationId);
+  const counts = payload.counts as Record<string, unknown>;
+  for (const field of ["journalEntries", "journalPages", "items", "scenes"] as const) {
+    assert(
+      typeof counts[field] === "number" && Number.isFinite(counts[field] as number) && (counts[field] as number) >= 0,
+      `payload.counts.${field}`,
+      "non-negative finite number",
+      correlationId
+    );
+  }
+}
+
 function validateWorldSaveRequestPayload(
   payload: Record<string, unknown>,
   correlationId: string
@@ -2030,6 +2266,12 @@ export function validateMessage(input: unknown): ProtocolMessage {
       break;
     case "client.world_save_request":
       validateWorldSaveRequestPayload(payload, id);
+      break;
+    case "backend.module_content.request":
+      validateBackendModuleContentRequestPayload(payload, id);
+      break;
+    case "client.module_content.response":
+      validateClientModuleContentResponsePayload(payload, id);
       break;
     case "ping":
       // PingPayload is empty — no further validation needed.

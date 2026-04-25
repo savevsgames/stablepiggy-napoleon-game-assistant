@@ -35,6 +35,8 @@ import type {
   BackendWallCreatePayload,
   BackendLightCreatePayload,
   BackendSceneUpdatePayload,
+  BackendModuleContentRequestPayload,
+  ClientModuleContentResponsePayload,
   WorldContent,
 } from "./index.js";
 
@@ -572,6 +574,137 @@ section("backend.scene.update (V2 Phase 3)");
   assertRejects(
     "rejects scene.update with darkness > 1",
     makeMessage("backend.scene.update", { ...validSceneUpdatePayload(), darkness: 1.5 }),
+    "validation_failed"
+  );
+}
+
+function validModuleContentRequestPayload(): BackendModuleContentRequestPayload {
+  return {
+    correlationId: "ingest-correl-1",
+    adventureId: "abomination-vaults",
+    packKeys: ["pf2e-abomination-vaults.av", "pf2e.abomination-vaults-bestiary"],
+    versionManifestId: "pf2e-abomination-vaults",
+  };
+}
+
+function validModuleContentResponsePayload(): ClientModuleContentResponsePayload {
+  return {
+    correlationId: "ingest-correl-1",
+    adventureId: "abomination-vaults",
+    journals: [
+      {
+        id: "j1",
+        name: "Volume 1: Ruins of Gauntlight",
+        folder: "Abomination Vaults",
+        pages: [
+          { id: "p1", name: "A01. Tarwynn Bridge", contentHtml: "<p>...</p>", sort: 100 },
+          { id: "p10", name: "A10. Mudlicker Throne Room", contentHtml: "<p>...</p>", sort: 1000 },
+        ],
+      },
+    ],
+    items: [
+      { id: "i1", name: "+1 Striking Rapier", type: "weapon", descriptionHtml: "<p>...</p>", folder: "Loot" },
+    ],
+    scenes: [
+      { id: "s1", name: "A — Gauntlight Ruins", folder: "Chapter 1" },
+    ],
+    version: "2.1.0",
+    counts: { journalEntries: 1, journalPages: 2, items: 1, scenes: 1 },
+  };
+}
+
+section("backend.module_content.request (V2 Phase 4 Commit 5b)");
+{
+  assertAccepts(
+    "valid module_content.request",
+    makeMessage("backend.module_content.request", validModuleContentRequestPayload())
+  );
+
+  assertRejects(
+    "rejects module_content.request with empty packKeys",
+    makeMessage("backend.module_content.request", { ...validModuleContentRequestPayload(), packKeys: [] }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects module_content.request with non-string packKey entry",
+    makeMessage("backend.module_content.request", {
+      ...validModuleContentRequestPayload(),
+      packKeys: ["valid.pack", 42 as unknown as string],
+    }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects module_content.request with missing versionManifestId",
+    makeMessage("backend.module_content.request", {
+      correlationId: "c1",
+      adventureId: "abomination-vaults",
+      packKeys: ["pf2e-abomination-vaults.av"],
+    } as unknown as BackendModuleContentRequestPayload),
+    "validation_failed"
+  );
+}
+
+section("client.module_content.response (V2 Phase 4 Commit 5b)");
+{
+  assertAccepts(
+    "valid module_content.response (full AV-shaped payload)",
+    makeMessage("client.module_content.response", validModuleContentResponsePayload())
+  );
+
+  assertAccepts(
+    "valid module_content.response with empty arrays",
+    makeMessage("client.module_content.response", {
+      correlationId: "c1",
+      adventureId: "abomination-vaults",
+      journals: [],
+      items: [],
+      scenes: [],
+      version: "1.0.0",
+      counts: { journalEntries: 0, journalPages: 0, items: 0, scenes: 0 },
+    })
+  );
+
+  assertRejects(
+    "rejects response with non-array journals",
+    makeMessage("client.module_content.response", {
+      ...validModuleContentResponsePayload(),
+      journals: "not an array" as unknown as ClientModuleContentResponsePayload["journals"],
+    }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects response with journal page missing sort",
+    makeMessage("client.module_content.response", {
+      ...validModuleContentResponsePayload(),
+      journals: [
+        {
+          id: "j1",
+          name: "Vol 1",
+          pages: [{ id: "p1", name: "A01", contentHtml: "" } as unknown as ClientModuleContentResponsePayload["journals"][number]["pages"][number]],
+        },
+      ],
+    }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects response with negative count",
+    makeMessage("client.module_content.response", {
+      ...validModuleContentResponsePayload(),
+      counts: { journalEntries: -1, journalPages: 0, items: 0, scenes: 0 },
+    }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects response with item missing type",
+    makeMessage("client.module_content.response", {
+      ...validModuleContentResponsePayload(),
+      items: [{ id: "i1", name: "Mystery Item" } as unknown as ClientModuleContentResponsePayload["items"][number]],
+    }),
     "validation_failed"
   );
 }

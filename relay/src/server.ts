@@ -262,6 +262,21 @@ async function handleMessage(
       case "client.world_save_request":
         await handleWorldSaveRequest(state, message, config, log);
         break;
+      case "client.module_content.response":
+        // V2 Phase 4 Commit 5b — protocol shape is live but the
+        // backend's HTTP receiver lands in Commit 5c. For now, log
+        // the response so we have visibility during the gap; the
+        // 5c commit replaces this with `forwardModuleContentToBackend(...)`.
+        log.info(
+          {
+            correlationId: message.payload.correlationId,
+            adventureId: message.payload.adventureId,
+            version: message.payload.version,
+            counts: message.payload.counts,
+          },
+          "module_content_response received (forwarding stub — Commit 5c wires backend HTTP)"
+        );
+        break;
       case "pong":
         // Clients sending pongs is rare in M2 (relay doesn't initiate pings
         // yet). Log and ignore.
@@ -285,6 +300,7 @@ async function handleMessage(
       case "backend.wall.create":
       case "backend.light.create":
       case "backend.data.upload":
+      case "backend.module_content.request":
         // Server-to-client message kinds — rejecting if a client sends one
         // catches confused clients or replay attacks.
         sendError(

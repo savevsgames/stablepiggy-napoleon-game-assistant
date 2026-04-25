@@ -102,11 +102,13 @@ import {
   type BackendLightCreatePayload,
   type BackendDataUploadPayload,
   type ClientDataUploadAckPayload,
+  type BackendModuleContentRequestPayload,
 } from "@stablepiggy-napoleon/protocol";
 
 import { info, warn, error as logError, debug } from "./log.js";
 import { getAuthToken, getRelayEndpoint } from "./settings.js";
 import { uploadToWorld } from "./world-files.js";
+import { enumerateAdventureContent, summarizeCounts } from "./module-content.js";
 
 // ── Foundry globals used by the chat.create handler ────────────────────
 // Typed against Foundry VTT v13.351. Kept minimal per
@@ -607,6 +609,9 @@ export class RelayClient {
       case "backend.data.upload":
         void this.handleDataUpload(message.payload, message.id);
         break;
+      case "backend.module_content.request":
+        void this.handleModuleContentRequest(message.payload);
+        break;
       case "error":
         warn(
           `relay sent error (code=${message.payload.code}): ${message.payload.message}`
@@ -625,6 +630,7 @@ export class RelayClient {
       case "client.session_event":
       case "client.data_upload_ack":
       case "client.world_save_request":
+      case "client.module_content.response":
         warn(
           `received ${message.kind} from relay — this kind is client→relay only`
         );
@@ -1740,6 +1746,79 @@ export class RelayClient {
     }
     const msg = makeMessage("client.data_upload_ack", payload);
     this.socket.send(JSON.stringify(msg));
+  }
+
+  /**
+   * V2 Phase 4 Commit 5b — handle backend's request to enumerate an
+   * Adventure Path's compendium pack contents for Trough ingestion.
+   * Sequential pack walk + GM whisper happen inside
+   * `enumerateAdventureContent`. The response goes back as a single
+   * `client.module_content.response` frame with the request's
+   * correlationId echoed.
+   *
+   * On enumeration failure: send a `client.module_content.response`
+   * with empty arrays + zero counts so the backend correlator
+   * resolves rather than timing out, and log the underlying error
+   * via `logError` so the GM-side issue is recoverable.
+   */
+  private async handleModuleContentRequest(
+    payload: BackendModuleContentRequestPayload
+  ): Promise<void> {
+    const { correlationId, adventureId, packKeys, versionManifestId } = payload;
+    info(
+      `handleModuleContentRequest: enumerating adventureId="${adventureId}" packKeys=${JSON.stringify(packKeys)} versionManifestId="${versionManifestId}"`
+    );
+
+    try {
+      const content = await enumerateAdventureContent({ packKeys, versionManifestId });
+      const counts = summarizeCounts(content);
+      info(
+        `handleModuleContentRequest: enumerated adventureId="${adventureId}" version=${content.version} ${JSON.stringify(counts)}`
+      );
+
+      if (this.status !== "connected" || !this.socket) {
+        warn(
+          `handleModuleContentRequest: connection lost mid-enumeration (status=${this.status}); response dropped for correlationId=${correlationId}`
+        );
+        return;
+      }
+
+      const response = makeMessage("client.module_content.response", {
+        correlationId,
+        adventureId,
+        journals: content.journals,
+        items: content.items,
+        scenes: content.scenes,
+        version: content.version,
+        counts,
+      });
+      this.socket.send(JSON.stringify(response));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(
+        `handleModuleContentRequest threw for adventureId="${adventureId}": ${msg}`,
+        err
+      );
+      // Send empty payload so the backend correlator resolves cleanly
+      // rather than waiting on a frame that never comes. Counts at
+      // zero communicate the "nothing ingested" outcome.
+      if (this.status === "connected" && this.socket) {
+        try {
+          const fallback = makeMessage("client.module_content.response", {
+            correlationId,
+            adventureId,
+            journals: [],
+            items: [],
+            scenes: [],
+            version: "unknown",
+            counts: { journalEntries: 0, journalPages: 0, items: 0, scenes: 0 },
+          });
+          this.socket.send(JSON.stringify(fallback));
+        } catch {
+          // Already logged above; nothing more to do.
+        }
+      }
+    }
   }
 
   // ── Timers ──────────────────────────────────────────────────────────
