@@ -2091,6 +2091,145 @@ function loadImage(src) {
     img.src = src;
   });
 }
+const CAPS = {
+  actors: 300,
+  scenes: 75,
+  journals: 250,
+  items: 200,
+  modules: 50
+};
+function toArray(coll) {
+  if (!coll) return [];
+  if (Array.isArray(coll.contents)) {
+    return coll.contents;
+  }
+  if (typeof coll.values === "function") {
+    return Array.from(coll.values());
+  }
+  if (typeof coll[Symbol.iterator] === "function") {
+    return Array.from(coll);
+  }
+  return [];
+}
+function getFolderName(doc) {
+  const f = doc.folder;
+  if (!f) return void 0;
+  return typeof f.name === "string" && f.name.length > 0 ? f.name : void 0;
+}
+function getActorLevel(actor) {
+  const sys = actor.system;
+  if (!sys) return void 0;
+  const details = sys.details;
+  if (details && details.level !== void 0) {
+    if (typeof details.level === "number" && Number.isFinite(details.level)) {
+      return details.level;
+    }
+    if (typeof details.level === "object" && details.level !== null) {
+      const inner = details.level.value;
+      if (typeof inner === "number" && Number.isFinite(inner)) return inner;
+    }
+  }
+  if (typeof sys.level === "number" && Number.isFinite(sys.level)) return sys.level;
+  return void 0;
+}
+function getJournalPageCount(j) {
+  const p = j.pages;
+  if (!p) return void 0;
+  const n = typeof p.size === "number" ? p.size : p.length;
+  return typeof n === "number" && Number.isFinite(n) ? n : void 0;
+}
+function enumerateActors() {
+  const out = [];
+  for (const a of toArray(game.actors)) {
+    if (typeof a.id !== "string" || !a.id) continue;
+    if (typeof a.name !== "string" || !a.name) continue;
+    if (typeof a.type !== "string" || !a.type) continue;
+    const lvl = getActorLevel(a);
+    const folder = getFolderName(a);
+    out.push({
+      id: a.id,
+      name: a.name,
+      type: a.type,
+      ...lvl !== void 0 ? { level: lvl } : {},
+      ...folder ? { folder } : {}
+    });
+    if (out.length >= CAPS.actors) break;
+  }
+  return out;
+}
+function enumerateScenes() {
+  const out = [];
+  for (const s of toArray(game.scenes)) {
+    if (typeof s.id !== "string" || !s.id) continue;
+    if (typeof s.name !== "string" || !s.name) continue;
+    const folder = getFolderName(s);
+    out.push({
+      id: s.id,
+      name: s.name,
+      active: s.active === true,
+      ...folder ? { folder } : {}
+    });
+    if (out.length >= CAPS.scenes) break;
+  }
+  return out;
+}
+function enumerateJournals() {
+  const out = [];
+  for (const j of toArray(game.journal)) {
+    if (typeof j.id !== "string" || !j.id) continue;
+    if (typeof j.name !== "string" || !j.name) continue;
+    const folder = getFolderName(j);
+    const pages = getJournalPageCount(j);
+    out.push({
+      id: j.id,
+      name: j.name,
+      ...folder ? { folder } : {},
+      ...pages !== void 0 ? { pageCount: pages } : {}
+    });
+    if (out.length >= CAPS.journals) break;
+  }
+  return out;
+}
+function enumerateItems() {
+  const out = [];
+  for (const it of toArray(game.items)) {
+    if (typeof it.id !== "string" || !it.id) continue;
+    if (typeof it.name !== "string" || !it.name) continue;
+    if (typeof it.type !== "string" || !it.type) continue;
+    const folder = getFolderName(it);
+    out.push({
+      id: it.id,
+      name: it.name,
+      type: it.type,
+      ...folder ? { folder } : {}
+    });
+    if (out.length >= CAPS.items) break;
+  }
+  return out;
+}
+function enumerateModules() {
+  const collection = game.modules;
+  if (!collection || typeof collection.entries !== "function") return [];
+  const out = [];
+  for (const [key, mod] of collection.entries()) {
+    const id = typeof mod.id === "string" && mod.id ? mod.id : key;
+    if (typeof id !== "string" || !id) continue;
+    if (typeof mod.title !== "string" || !mod.title) continue;
+    out.push({ id, title: mod.title, active: mod.active === true });
+    if (out.length >= CAPS.modules) break;
+  }
+  return out;
+}
+function buildWorldContent() {
+  if (!game?.ready) return null;
+  return {
+    actors: enumerateActors(),
+    scenes: enumerateScenes(),
+    journals: enumerateJournals(),
+    items: enumerateItems(),
+    modules: enumerateModules()
+  };
+}
 const MODULE_ID$1 = "stablepiggy-napoleon-game-assistant";
 const RESPONSE_TIMEOUT_MS = 18e4;
 function registerChatCommand(client) {
@@ -2161,6 +2300,7 @@ async function handleNapoleonQuery(client, sessionId, query) {
     totalHeight: activeDims.height,
     gridSize: activeDims.size
   } : null;
+  const worldContent = buildWorldContent();
   const queryId = client.sendQuery({
     sessionId,
     query,
@@ -2168,6 +2308,7 @@ async function handleNapoleonQuery(client, sessionId, query) {
       sceneId: activeScene?.id ?? null,
       sceneName: activeScene?.name ?? null,
       sceneDimensions,
+      ...worldContent ? { worldContent } : {},
       selectedActorIds: [],
       inCombat: false,
       recentChat: []
