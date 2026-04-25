@@ -344,6 +344,119 @@ export async function forwardWorldSaveToBackend(
   return parsed;
 }
 
+// ── Module Content Ingestion forward (V2 Phase 4 Commit 5c) ────────────
+
+/**
+ * Forward a `client.module_content.response` payload to the backend's
+ * `/my/foundry/module-ingest` endpoint. The backend resolves the
+ * campaign by worldId, resolves the AP definition (and version
+ * manifest) from its own registry, and runs ingestAdventure
+ * synchronously — long-running (~10-90s for AV-class adventures).
+ *
+ * Long ingestion times mean the HTTP response from this call may take
+ * tens of seconds. Caller MUST NOT block other inbound WS messages on
+ * this; the dispatcher fires the forward async (`void`) and logs the
+ * outcome.
+ */
+export interface ModuleContentForwardResult {
+  readonly ok: boolean;
+  readonly adventureId: string;
+  readonly version: string;
+  readonly chunksInserted: number;
+  readonly chunksDeleted: number;
+  readonly tokensUsed: number;
+  readonly batches: number;
+  readonly durationMs: number;
+}
+
+export async function forwardModuleContentToBackend(
+  connection: ConnectionState,
+  payload: {
+    readonly correlationId: string;
+    readonly adventureId: string;
+    readonly journals: readonly unknown[];
+    readonly items: readonly unknown[];
+    readonly scenes: readonly unknown[];
+    readonly version: string;
+    readonly counts: unknown;
+  },
+  messageId: string,
+  config: Config,
+  log: Logger,
+): Promise<ModuleContentForwardResult> {
+  if (!connection.identityId || !connection.worldId) {
+    throw new Error(
+      "connection state missing identityId/worldId — client.hello was not completed",
+    );
+  }
+
+  if (!config.backendUrl) {
+    throw new Error(
+      "backend URL is not configured — cannot forward module-ingest request",
+    );
+  }
+
+  const ingestUrl = config.backendUrl.replace(/\/query$/, "/module-ingest");
+  if (ingestUrl === config.backendUrl) {
+    throw new Error(
+      `cannot derive module-ingest URL: backendUrl does not end with /query (got "${config.backendUrl}")`,
+    );
+  }
+
+  const body = {
+    worldId: connection.worldId,
+    identityId: connection.identityId,
+    correlationId: payload.correlationId,
+    adventureId: payload.adventureId,
+    journals: payload.journals,
+    items: payload.items,
+    scenes: payload.scenes,
+    version: payload.version,
+    counts: payload.counts,
+  };
+
+  const startedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(ingestUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Authorization: `Bearer ${config.backendToken}`,
+        "X-Correlation-Id": messageId,
+        "X-Relay-Version": RELAY_VERSION,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown fetch error";
+    throw new Error(`module-ingest backend unreachable: ${msg}`);
+  }
+
+  const durationMs = Date.now() - startedAt;
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "<unreadable>");
+    throw new Error(
+      `module-ingest backend HTTP ${response.status} in ${durationMs}ms: ${text.slice(0, 200)}`,
+    );
+  }
+
+  const parsed = (await response.json()) as ModuleContentForwardResult;
+  log.info(
+    {
+      messageId,
+      adventureId: parsed.adventureId,
+      chunksInserted: parsed.chunksInserted,
+      chunksDeleted: parsed.chunksDeleted,
+      tokensUsed: parsed.tokensUsed,
+      durationMs,
+    },
+    "module-ingest backend responded",
+  );
+  return parsed;
+}
+
 // ── Identity resolution (M2.1) ──────────────────────────────────────────
 //
 // When a GM authenticates with a StablePiggy API key (any `authToken` in

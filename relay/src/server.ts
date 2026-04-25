@@ -61,6 +61,7 @@ import {
 import {
   forwardQueryToBackend,
   forwardWorldSaveToBackend,
+  forwardModuleContentToBackend,
   resolveIdentityFromApiKey,
 } from "./backend-client.js";
 import {
@@ -263,19 +264,38 @@ async function handleMessage(
         await handleWorldSaveRequest(state, message, config, log);
         break;
       case "client.module_content.response":
-        // V2 Phase 4 Commit 5b — protocol shape is live but the
-        // backend's HTTP receiver lands in Commit 5c. For now, log
-        // the response so we have visibility during the gap; the
-        // 5c commit replaces this with `forwardModuleContentToBackend(...)`.
-        log.info(
-          {
-            correlationId: message.payload.correlationId,
-            adventureId: message.payload.adventureId,
-            version: message.payload.version,
-            counts: message.payload.counts,
-          },
-          "module_content_response received (forwarding stub — Commit 5c wires backend HTTP)"
-        );
+        // V2 Phase 4 Commit 5c — forward to backend's
+        // /my/foundry/module-ingest endpoint. Long-running (~10-90s
+        // for AV-class) — fire-and-forget so other inbound WS
+        // messages don't queue behind ingestion. Errors are logged;
+        // future commits (5d/5e) wire chat-side progress + completion
+        // notifications back to the GM.
+        void forwardModuleContentToBackend(
+          state,
+          message.payload,
+          message.id,
+          config,
+          log,
+        )
+          .then((result) => {
+            log.info(
+              {
+                adventureId: result.adventureId,
+                chunksInserted: result.chunksInserted,
+                chunksDeleted: result.chunksDeleted,
+                tokensUsed: result.tokensUsed,
+                durationMs: result.durationMs,
+              },
+              "module-ingest forward complete",
+            );
+          })
+          .catch((err: unknown) => {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            log.error(
+              { adventureId: message.payload.adventureId, err: errMsg },
+              "module-ingest forward failed",
+            );
+          });
         break;
       case "pong":
         // Clients sending pongs is rare in M2 (relay doesn't initiate pings
