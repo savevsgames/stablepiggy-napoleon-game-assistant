@@ -1845,6 +1845,7 @@ export class RelayClient {
         journals: content.journals,
         items: content.items,
         scenes: content.scenes,
+        actors: content.actors,
         version: content.version,
         counts,
       });
@@ -1866,8 +1867,9 @@ export class RelayClient {
             journals: [],
             items: [],
             scenes: [],
+            actors: [],
             version: "unknown",
-            counts: { journalEntries: 0, journalPages: 0, items: 0, scenes: 0 },
+            counts: { journalEntries: 0, journalPages: 0, items: 0, scenes: 0, actors: 0 },
           });
           this.socket.send(JSON.stringify(fallback));
         } catch {

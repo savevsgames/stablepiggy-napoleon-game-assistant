@@ -1056,6 +1056,32 @@ export interface ModuleItem {
 }
 
 /**
+ * One Actor document — bestiary / NPC entry. `descriptionHtml` is the
+ * lore / public-notes flavour text; mechanical stat blocks are
+ * intentionally NOT carried (those live in Foundry where the GM
+ * drag-drops the actor onto the canvas; quoting mechanics from
+ * training memory was never the goal). Description field varies by
+ * system — module enumerator tries a per-system fallback chain
+ * (pf2e: `system.details.publicNotes`; dnd5e:
+ * `system.details.biography.value`; generic: `system.description.value`)
+ * and uses whatever first yields a non-empty string.
+ *
+ * Added 2026-04-25 (V2 Phase 4 Commit 6) — supersedes the L7 actor-
+ * exclusion rule. The exclusion was originally copyright-driven, and
+ * the user-ingested provenance contract now handles licensing
+ * structurally; lore text on bestiary entries is genuinely useful
+ * for "who is Boss Skrawng?" / "tell me about the Mitflits" queries.
+ */
+export interface ModuleActor {
+  readonly id: string;
+  readonly name: string;
+  /** Actor type per the system (pf2e: "npc"/"character"/"hazard"; 5e: "npc"/"character"; etc.) */
+  readonly type: string;
+  readonly descriptionHtml?: string;
+  readonly folder?: string;
+}
+
+/**
  * One Scene summary. Names + folder only — background image refs
  * intentionally NOT included (per spec L7 ingestion scope: scenes
  * contribute name + description, not image content). Optional
@@ -1067,6 +1093,50 @@ export interface ModuleSceneSummary {
   readonly name: string;
   readonly description?: string;
   readonly folder?: string;
+  /**
+   * Map pins (Foundry V13 `scene.notes`) — the canonical link between
+   * a scene's image and the journal pages keyed off it. Each pin
+   * carries the journal entry id (and, V13+, an optional page id) so
+   * the backend can resolve "this pin on map A points to journal page
+   * A10. Mudlicker Throne Room" during chunking. Without this, scene
+   * chunks and journal chunks live as siloed data and Napoleon cannot
+   * answer "what's in A10?" by walking from the active scene to its
+   * room journals.
+   *
+   * Optional because: (a) older Foundry adventures may have empty
+   * `scene.notes` collections, and (b) backwards-compatibility with
+   * pre-pins ingestions that still have v1 protocol shape on the
+   * wire.
+   */
+  readonly pins?: readonly ModuleScenePin[];
+}
+
+/**
+ * One map pin on a scene. Mirrors Foundry V13's `NoteDocument` shape,
+ * trimmed to the fields the ingestion engine actually needs (no icon,
+ * tint, font, glow, or text-anchor — those are display concerns,
+ * irrelevant to RAG retrieval).
+ */
+export interface ModuleScenePin {
+  /** Foundry note document id; stable per-pin within a scene. */
+  readonly id: string;
+  /** Foreign key to a `JournalEntry` document — required. */
+  readonly entryId: string;
+  /**
+   * Specific page within the linked journal entry (Foundry V13+).
+   * Optional because legacy adventures (or pins authored against pre-
+   * V13 modules) reference the entire entry without a page anchor.
+   */
+  readonly pageId?: string;
+  /**
+   * Pin label as shown on the scene (often the room code itself,
+   * e.g. "A10"). Optional because some pins inherit their label from
+   * the linked journal page name without storing it locally.
+   */
+  readonly label?: string;
+  /** Pin position in the scene image — useful for future spatial features. */
+  readonly x?: number;
+  readonly y?: number;
 }
 
 /**
@@ -1085,6 +1155,12 @@ export interface ClientModuleContentResponsePayload {
   readonly items: readonly ModuleItem[];
   readonly scenes: readonly ModuleSceneSummary[];
   /**
+   * Bestiary / NPC actors. Optional for backwards-compatibility with
+   * pre-Commit-6 clients that don't enumerate actors; ingestion engine
+   * defaults to `[]` when absent.
+   */
+  readonly actors?: readonly ModuleActor[];
+  /**
    * Version string from `game.modules.get(versionManifestId)?.version`,
    * captured at enumeration time. Backend stores as
    * `foundry_campaigns.module_ingested_version` for major-update
@@ -1098,6 +1174,8 @@ export interface ClientModuleContentResponsePayload {
     readonly journalPages: number;
     readonly items: number;
     readonly scenes: number;
+    /** Optional for backwards-compatibility with pre-Commit-6 clients. */
+    readonly actors?: number;
   };
 }
 
@@ -2148,7 +2226,7 @@ function validateClientModuleContentResponsePayload(
     }
   }
 
-  // Scenes
+  // Scenes (with optional pins per V2 Phase 4 Commit 6)
   assert(Array.isArray(payload.scenes), "payload.scenes", "array", correlationId);
   for (let i = 0; i < (payload.scenes as unknown[]).length; i++) {
     const s = (payload.scenes as unknown[])[i];
@@ -2162,6 +2240,47 @@ function validateClientModuleContentResponsePayload(
     if ("folder" in sr && sr.folder !== undefined) {
       assert(typeof sr.folder === "string", `payload.scenes[${i}].folder`, "string when present", correlationId);
     }
+    if ("pins" in sr && sr.pins !== undefined) {
+      assert(Array.isArray(sr.pins), `payload.scenes[${i}].pins`, "array when present", correlationId);
+      for (let k = 0; k < (sr.pins as unknown[]).length; k++) {
+        const p = (sr.pins as unknown[])[k];
+        assert(isPlainObject(p), `payload.scenes[${i}].pins[${k}]`, "an object", correlationId);
+        const pr = p as Record<string, unknown>;
+        assert(isNonEmptyString(pr.id), `payload.scenes[${i}].pins[${k}].id`, "non-empty string", correlationId);
+        assert(isNonEmptyString(pr.entryId), `payload.scenes[${i}].pins[${k}].entryId`, "non-empty string", correlationId);
+        if ("pageId" in pr && pr.pageId !== undefined) {
+          assert(typeof pr.pageId === "string", `payload.scenes[${i}].pins[${k}].pageId`, "string when present", correlationId);
+        }
+        if ("label" in pr && pr.label !== undefined) {
+          assert(typeof pr.label === "string", `payload.scenes[${i}].pins[${k}].label`, "string when present", correlationId);
+        }
+        if ("x" in pr && pr.x !== undefined) {
+          assert(typeof pr.x === "number" && Number.isFinite(pr.x), `payload.scenes[${i}].pins[${k}].x`, "finite number when present", correlationId);
+        }
+        if ("y" in pr && pr.y !== undefined) {
+          assert(typeof pr.y === "number" && Number.isFinite(pr.y), `payload.scenes[${i}].pins[${k}].y`, "finite number when present", correlationId);
+        }
+      }
+    }
+  }
+
+  // Actors (V2 Phase 4 Commit 6 — bestiary lore, optional for backwards compat)
+  if ("actors" in payload && payload.actors !== undefined) {
+    assert(Array.isArray(payload.actors), "payload.actors", "array when present", correlationId);
+    for (let i = 0; i < (payload.actors as unknown[]).length; i++) {
+      const a = (payload.actors as unknown[])[i];
+      assert(isPlainObject(a), `payload.actors[${i}]`, "an object", correlationId);
+      const ar = a as Record<string, unknown>;
+      assert(isNonEmptyString(ar.id), `payload.actors[${i}].id`, "non-empty string", correlationId);
+      assert(isNonEmptyString(ar.name), `payload.actors[${i}].name`, "non-empty string", correlationId);
+      assert(isNonEmptyString(ar.type), `payload.actors[${i}].type`, "non-empty string", correlationId);
+      if ("descriptionHtml" in ar && ar.descriptionHtml !== undefined) {
+        assert(typeof ar.descriptionHtml === "string", `payload.actors[${i}].descriptionHtml`, "string when present", correlationId);
+      }
+      if ("folder" in ar && ar.folder !== undefined) {
+        assert(typeof ar.folder === "string", `payload.actors[${i}].folder`, "string when present", correlationId);
+      }
+    }
   }
 
   // Counts
@@ -2172,6 +2291,15 @@ function validateClientModuleContentResponsePayload(
       typeof counts[field] === "number" && Number.isFinite(counts[field] as number) && (counts[field] as number) >= 0,
       `payload.counts.${field}`,
       "non-negative finite number",
+      correlationId
+    );
+  }
+  // counts.actors optional for backwards compat
+  if ("actors" in counts && counts.actors !== undefined) {
+    assert(
+      typeof counts.actors === "number" && Number.isFinite(counts.actors as number) && (counts.actors as number) >= 0,
+      "payload.counts.actors",
+      "non-negative finite number when present",
       correlationId
     );
   }

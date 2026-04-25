@@ -518,11 +518,53 @@ function validateClientModuleContentResponsePayload(payload, correlationId) {
     if ("folder" in sr && sr.folder !== void 0) {
       assert(typeof sr.folder === "string", `payload.scenes[${i}].folder`, "string when present", correlationId);
     }
+    if ("pins" in sr && sr.pins !== void 0) {
+      assert(Array.isArray(sr.pins), `payload.scenes[${i}].pins`, "array when present", correlationId);
+      for (let k = 0; k < sr.pins.length; k++) {
+        const p = sr.pins[k];
+        assert(isPlainObject(p), `payload.scenes[${i}].pins[${k}]`, "an object", correlationId);
+        const pr = p;
+        assert(isNonEmptyString(pr.id), `payload.scenes[${i}].pins[${k}].id`, "non-empty string", correlationId);
+        assert(isNonEmptyString(pr.entryId), `payload.scenes[${i}].pins[${k}].entryId`, "non-empty string", correlationId);
+        if ("pageId" in pr && pr.pageId !== void 0) {
+          assert(typeof pr.pageId === "string", `payload.scenes[${i}].pins[${k}].pageId`, "string when present", correlationId);
+        }
+        if ("label" in pr && pr.label !== void 0) {
+          assert(typeof pr.label === "string", `payload.scenes[${i}].pins[${k}].label`, "string when present", correlationId);
+        }
+        if ("x" in pr && pr.x !== void 0) {
+          assert(typeof pr.x === "number" && Number.isFinite(pr.x), `payload.scenes[${i}].pins[${k}].x`, "finite number when present", correlationId);
+        }
+        if ("y" in pr && pr.y !== void 0) {
+          assert(typeof pr.y === "number" && Number.isFinite(pr.y), `payload.scenes[${i}].pins[${k}].y`, "finite number when present", correlationId);
+        }
+      }
+    }
+  }
+  if ("actors" in payload && payload.actors !== void 0) {
+    assert(Array.isArray(payload.actors), "payload.actors", "array when present", correlationId);
+    for (let i = 0; i < payload.actors.length; i++) {
+      const a = payload.actors[i];
+      assert(isPlainObject(a), `payload.actors[${i}]`, "an object", correlationId);
+      const ar = a;
+      assert(isNonEmptyString(ar.id), `payload.actors[${i}].id`, "non-empty string", correlationId);
+      assert(isNonEmptyString(ar.name), `payload.actors[${i}].name`, "non-empty string", correlationId);
+      assert(isNonEmptyString(ar.type), `payload.actors[${i}].type`, "non-empty string", correlationId);
+      if ("descriptionHtml" in ar && ar.descriptionHtml !== void 0) {
+        assert(typeof ar.descriptionHtml === "string", `payload.actors[${i}].descriptionHtml`, "string when present", correlationId);
+      }
+      if ("folder" in ar && ar.folder !== void 0) {
+        assert(typeof ar.folder === "string", `payload.actors[${i}].folder`, "string when present", correlationId);
+      }
+    }
   }
   assert(isPlainObject(payload.counts), "payload.counts", "an object", correlationId);
   const counts = payload.counts;
   for (const field of ["journalEntries", "journalPages", "items", "scenes"]) {
     assert(typeof counts[field] === "number" && Number.isFinite(counts[field]) && counts[field] >= 0, `payload.counts.${field}`, "non-negative finite number", correlationId);
+  }
+  if ("actors" in counts && counts.actors !== void 0) {
+    assert(typeof counts.actors === "number" && Number.isFinite(counts.actors) && counts.actors >= 0, "payload.counts.actors", "non-negative finite number when present", correlationId);
   }
 }
 function validateAdventureConsentPayload(payload, correlationId) {
@@ -879,10 +921,51 @@ function extractScene(s, versionManifestId, out) {
     description = directFlag.description;
   }
   const folder = getFolderName$1(s);
+  const pins = [];
+  if (s.notes) {
+    for (const n of s.notes) {
+      const pinId = typeof n.id === "string" && n.id ? n.id : typeof n._id === "string" && n._id ? n._id : "";
+      if (!pinId) continue;
+      if (typeof n.entryId !== "string" || !n.entryId) continue;
+      const pin = {
+        id: pinId,
+        entryId: n.entryId
+      };
+      if (typeof n.pageId === "string" && n.pageId.length > 0) pin.pageId = n.pageId;
+      if (typeof n.text === "string" && n.text.length > 0) pin.label = n.text;
+      if (typeof n.x === "number" && Number.isFinite(n.x)) pin.x = n.x;
+      if (typeof n.y === "number" && Number.isFinite(n.y)) pin.y = n.y;
+      pins.push(pin);
+    }
+  }
   out.push({
     id: s.id,
     name: s.name,
     ...description ? { description } : {},
+    ...folder ? { folder } : {},
+    ...pins.length > 0 ? { pins } : {}
+  });
+}
+function readActorDescription(actor) {
+  const pf2e = actor.system?.details?.publicNotes;
+  if (typeof pf2e === "string" && pf2e.length > 0) return pf2e;
+  const dnd5e = actor.system?.details?.biography?.value;
+  if (typeof dnd5e === "string" && dnd5e.length > 0) return dnd5e;
+  const generic = actor.system?.description?.value;
+  if (typeof generic === "string" && generic.length > 0) return generic;
+  return void 0;
+}
+function extractActor(a, out) {
+  if (typeof a.id !== "string" || !a.id) return;
+  if (typeof a.name !== "string" || !a.name) return;
+  if (typeof a.type !== "string" || !a.type) return;
+  const description = readActorDescription(a);
+  const folder = getFolderName$1(a);
+  out.push({
+    id: a.id,
+    name: a.name,
+    type: a.type,
+    ...description ? { descriptionHtml: description } : {},
     ...folder ? { folder } : {}
   });
 }
@@ -890,6 +973,7 @@ async function enumerateAdventureContent(opts) {
   const journals = [];
   const items = [];
   const scenes = [];
+  const actors = [];
   const packKeySet = new Set(opts.packKeys);
   const matchingPacks = Array.from(game.packs).filter((pack) => {
     const key = packKey(pack);
@@ -897,7 +981,7 @@ async function enumerateAdventureContent(opts) {
   });
   if (matchingPacks.length === 0) {
     const version2 = game.modules.get(opts.versionManifestId)?.version ?? "unknown";
-    return { journals, items, scenes, version: version2 };
+    return { journals, items, scenes, actors, version: version2 };
   }
   try {
     await ChatMessage.create({
@@ -916,6 +1000,9 @@ async function enumerateAdventureContent(opts) {
     } else if (pack.documentName === "Scene") {
       const docs = await pack.getDocuments();
       for (const s of docs) extractScene(s, opts.versionManifestId, scenes);
+    } else if (pack.documentName === "Actor") {
+      const docs = await pack.getDocuments();
+      for (const a of docs) extractActor(a, actors);
     } else if (pack.documentName === "Adventure") {
       const docs = await pack.getDocuments();
       for (const adv of docs) {
@@ -928,11 +1015,14 @@ async function enumerateAdventureContent(opts) {
         if (adv.scenes) {
           for (const s of adv.scenes) extractScene(s, opts.versionManifestId, scenes);
         }
+        if (adv.actors) {
+          for (const a of adv.actors) extractActor(a, actors);
+        }
       }
     }
   }
   const version = game.modules.get(opts.versionManifestId)?.version ?? "unknown";
-  return { journals, items, scenes, version };
+  return { journals, items, scenes, actors, version };
 }
 function summarizeCounts(content) {
   let journalPages = 0;
@@ -941,7 +1031,8 @@ function summarizeCounts(content) {
     journalEntries: content.journals.length,
     journalPages,
     items: content.items.length,
-    scenes: content.scenes.length
+    scenes: content.scenes.length,
+    actors: content.actors.length
   };
 }
 function escapeHtml$1(s) {
@@ -2256,6 +2347,7 @@ class RelayClient {
         journals: content.journals,
         items: content.items,
         scenes: content.scenes,
+        actors: content.actors,
         version: content.version,
         counts
       });
@@ -2274,8 +2366,9 @@ class RelayClient {
             journals: [],
             items: [],
             scenes: [],
+            actors: [],
             version: "unknown",
-            counts: { journalEntries: 0, journalPages: 0, items: 0, scenes: 0 }
+            counts: { journalEntries: 0, journalPages: 0, items: 0, scenes: 0, actors: 0 }
           });
           this.socket.send(JSON.stringify(fallback));
         } catch {

@@ -377,6 +377,8 @@ export async function forwardModuleContentToBackend(
     readonly journals: readonly unknown[];
     readonly items: readonly unknown[];
     readonly scenes: readonly unknown[];
+    /** V2 Phase 4 Commit 6 — bestiary actors. Optional for pre-Commit-6 clients. */
+    readonly actors?: readonly unknown[];
     readonly version: string;
     readonly counts: unknown;
   },
@@ -411,6 +413,7 @@ export async function forwardModuleContentToBackend(
     journals: payload.journals,
     items: payload.items,
     scenes: payload.scenes,
+    ...(payload.actors !== undefined ? { actors: payload.actors } : {}),
     version: payload.version,
     counts: payload.counts,
   };

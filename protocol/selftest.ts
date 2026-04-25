@@ -750,6 +750,61 @@ section("client.module_content.response (V2 Phase 4 Commit 5b)");
     }),
     "validation_failed"
   );
+
+  // V2 Phase 4 Commit 6 — pins on scenes + bestiary actors.
+  assertAccepts(
+    "valid module_content.response with scene pins",
+    makeMessage("client.module_content.response", {
+      ...validModuleContentResponsePayload(),
+      scenes: [
+        {
+          id: "s1",
+          name: "A — Gauntlight Ruins",
+          folder: "Chapter 1",
+          pins: [
+            { id: "n1", entryId: "j1", pageId: "p10", label: "A10", x: 1200, y: 800 },
+            { id: "n2", entryId: "j1", pageId: "p1", label: "A01" },
+          ],
+        },
+      ],
+    })
+  );
+
+  assertAccepts(
+    "valid module_content.response with bestiary actors + counts.actors",
+    makeMessage("client.module_content.response", {
+      ...validModuleContentResponsePayload(),
+      actors: [
+        { id: "a1", name: "Boss Skrawng", type: "npc", descriptionHtml: "<p>...</p>", folder: "Mudlickers" },
+        { id: "a2", name: "Mitflit", type: "npc" },
+      ],
+      counts: { journalEntries: 1, journalPages: 2, items: 1, scenes: 1, actors: 2 },
+    })
+  );
+
+  assertRejects(
+    "rejects response with pin missing entryId",
+    makeMessage("client.module_content.response", {
+      ...validModuleContentResponsePayload(),
+      scenes: [
+        {
+          id: "s1",
+          name: "A — Gauntlight Ruins",
+          pins: [{ id: "n1", label: "A10" } as unknown as { id: string; entryId: string }],
+        },
+      ],
+    }),
+    "validation_failed"
+  );
+
+  assertRejects(
+    "rejects response with actor missing type",
+    makeMessage("client.module_content.response", {
+      ...validModuleContentResponsePayload(),
+      actors: [{ id: "a1", name: "Mystery NPC" } as unknown as { id: string; name: string; type: string }],
+    }),
+    "validation_failed"
+  );
 }
 
 function validAdventureIngestionRequest(): ClientAdventureIngestionRequestPayload {

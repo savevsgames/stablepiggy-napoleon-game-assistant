@@ -38,6 +38,8 @@ import type {
   ModuleJournalPage,
   ModuleItem,
   ModuleSceneSummary,
+  ModuleScenePin,
+  ModuleActor,
 } from "@stablepiggy-napoleon/protocol";
 
 // ── Narrow Foundry type declarations (per-file pattern; matches the
@@ -67,8 +69,37 @@ interface FoundryItemDoc extends FoundryDocument {
   readonly system?: { readonly description?: { readonly value?: string } };
 }
 
+interface FoundryNoteDoc {
+  readonly id?: string;
+  readonly _id?: string;
+  readonly entryId?: string;
+  readonly pageId?: string | null;
+  readonly text?: string;
+  readonly x?: number;
+  readonly y?: number;
+}
+
 interface FoundrySceneDoc extends FoundryDocument {
   readonly flags?: Record<string, { readonly description?: string } | undefined>;
+  readonly notes?: { [Symbol.iterator](): IterableIterator<FoundryNoteDoc> };
+}
+
+/**
+ * Foundry Actor document. The description-bearing field varies by
+ * system; we read a fallback chain rather than hardcoding any one
+ * system's path. Mechanical fields (attributes, items, abilities) are
+ * intentionally absent — those are display/play-time data, not
+ * search-relevant lore.
+ */
+interface FoundryActorDoc extends FoundryDocument {
+  readonly type?: string;
+  readonly system?: {
+    readonly details?: {
+      readonly publicNotes?: string;       // pf2e
+      readonly biography?: { readonly value?: string };  // dnd5e
+    };
+    readonly description?: { readonly value?: string };  // generic fallback
+  };
 }
 
 /**
@@ -80,6 +111,7 @@ interface FoundryAdventureDoc extends FoundryDocument {
   readonly journal?: { [Symbol.iterator](): IterableIterator<FoundryJournalEntry> };
   readonly items?: { [Symbol.iterator](): IterableIterator<FoundryItemDoc> };
   readonly scenes?: { [Symbol.iterator](): IterableIterator<FoundrySceneDoc> };
+  readonly actors?: { [Symbol.iterator](): IterableIterator<FoundryActorDoc> };
 }
 
 interface FoundryPack {
@@ -170,10 +202,70 @@ function extractScene(
     description = directFlag.description;
   }
   const folder = getFolderName(s);
+
+  // Map pins (V2 Phase 4 Commit 6). Foundry V13 scene.notes is a
+  // Collection<NoteDocument>. Each pin links to a journal entry +
+  // optional page, optionally with a label (often the room code
+  // itself, e.g. "A10"). We capture this so the backend can join
+  // pins to journals during chunking and the GM can ask "what's in
+  // A10?" → the engine walks pin.entryId/pageId to resolve the
+  // journal page.
+  const pins: ModuleScenePin[] = [];
+  if (s.notes) {
+    for (const n of s.notes) {
+      const pinId = (typeof n.id === "string" && n.id) ? n.id
+                  : (typeof n._id === "string" && n._id) ? n._id : "";
+      if (!pinId) continue;
+      if (typeof n.entryId !== "string" || !n.entryId) continue;
+      const pin: { -readonly [K in keyof ModuleScenePin]: ModuleScenePin[K] } = {
+        id: pinId,
+        entryId: n.entryId,
+      };
+      if (typeof n.pageId === "string" && n.pageId.length > 0) pin.pageId = n.pageId;
+      if (typeof n.text === "string" && n.text.length > 0) pin.label = n.text;
+      if (typeof n.x === "number" && Number.isFinite(n.x)) pin.x = n.x;
+      if (typeof n.y === "number" && Number.isFinite(n.y)) pin.y = n.y;
+      pins.push(pin);
+    }
+  }
+
   out.push({
     id: s.id,
     name: s.name,
     ...(description ? { description } : {}),
+    ...(folder ? { folder } : {}),
+    ...(pins.length > 0 ? { pins } : {}),
+  });
+}
+
+/**
+ * Read an actor's lore description by trying common system field
+ * paths. Order of fallback: pf2e (`system.details.publicNotes`),
+ * dnd5e (`system.details.biography.value`), generic
+ * (`system.description.value`). First non-empty wins. Returns
+ * undefined when no path yields content.
+ */
+function readActorDescription(actor: FoundryActorDoc): string | undefined {
+  const pf2e = actor.system?.details?.publicNotes;
+  if (typeof pf2e === "string" && pf2e.length > 0) return pf2e;
+  const dnd5e = actor.system?.details?.biography?.value;
+  if (typeof dnd5e === "string" && dnd5e.length > 0) return dnd5e;
+  const generic = actor.system?.description?.value;
+  if (typeof generic === "string" && generic.length > 0) return generic;
+  return undefined;
+}
+
+function extractActor(a: FoundryActorDoc, out: ModuleActor[]): void {
+  if (typeof a.id !== "string" || !a.id) return;
+  if (typeof a.name !== "string" || !a.name) return;
+  if (typeof a.type !== "string" || !a.type) return;
+  const description = readActorDescription(a);
+  const folder = getFolderName(a);
+  out.push({
+    id: a.id,
+    name: a.name,
+    type: a.type,
+    ...(description ? { descriptionHtml: description } : {}),
     ...(folder ? { folder } : {}),
   });
 }
@@ -199,6 +291,7 @@ export interface EnumeratedContent {
   readonly journals: readonly ModuleJournalEntry[];
   readonly items: readonly ModuleItem[];
   readonly scenes: readonly ModuleSceneSummary[];
+  readonly actors: readonly ModuleActor[];
   readonly version: string;
 }
 
@@ -213,6 +306,7 @@ export async function enumerateAdventureContent(
   const journals: ModuleJournalEntry[] = [];
   const items: ModuleItem[] = [];
   const scenes: ModuleSceneSummary[] = [];
+  const actors: ModuleActor[] = [];
 
   // Filter packs first so the whisper-then-enumerate pattern only
   // fires when there's actually work to do. Filter by FULL pack key
@@ -225,7 +319,7 @@ export async function enumerateAdventureContent(
 
   if (matchingPacks.length === 0) {
     const version = game.modules.get(opts.versionManifestId)?.version ?? "unknown";
-    return { journals, items, scenes, version };
+    return { journals, items, scenes, actors, version };
   }
 
   // GM whisper before the first heavy load so a stuttering tab is
@@ -252,13 +346,18 @@ export async function enumerateAdventureContent(
     } else if (pack.documentName === "Scene") {
       const docs = (await pack.getDocuments()) as readonly FoundrySceneDoc[];
       for (const s of docs) extractScene(s, opts.versionManifestId, scenes);
+    } else if (pack.documentName === "Actor") {
+      // V2 Phase 4 Commit 6 — bestiary lore. Per-system field path
+      // resolution lives in readActorDescription; the dispatch here
+      // is system-agnostic.
+      const docs = (await pack.getDocuments()) as readonly FoundryActorDoc[];
+      for (const a of docs) extractActor(a, actors);
     } else if (pack.documentName === "Adventure") {
       // Paizo's Adventure Path packs (and Foundry V13 Adventure
       // packs in general) ship a SINGLE Adventure document that
       // wraps embedded journal/items/scenes/actors collections.
       // Walk the embedded collections directly — same shape as the
       // top-level pack branches above, just one indirection deeper.
-      // Skips `.actors` per L7 scope (no NPC stat blocks).
       const docs = (await pack.getDocuments()) as readonly FoundryAdventureDoc[];
       for (const adv of docs) {
         if (adv.journal) {
@@ -270,18 +369,17 @@ export async function enumerateAdventureContent(
         if (adv.scenes) {
           for (const s of adv.scenes) extractScene(s, opts.versionManifestId, scenes);
         }
+        if (adv.actors) {
+          for (const a of adv.actors) extractActor(a, actors);
+        }
       }
     }
     // Other document types in matched packs (Macros, RollTables,
-    // Actor, etc.) are intentionally skipped — out of scope per spec
-    // L7. The bestiary subpack (documentName="Actor") falls through
-    // here without contributing content. Future commits can extend
-    // this dispatch as new content types are added to the ingestion
-    // scope.
+    // etc.) are intentionally skipped — out of scope.
   }
 
   const version = game.modules.get(opts.versionManifestId)?.version ?? "unknown";
-  return { journals, items, scenes, version };
+  return { journals, items, scenes, actors, version };
 }
 
 /**
@@ -294,6 +392,7 @@ export function summarizeCounts(content: EnumeratedContent): {
   readonly journalPages: number;
   readonly items: number;
   readonly scenes: number;
+  readonly actors: number;
 } {
   let journalPages = 0;
   for (const j of content.journals) journalPages += j.pages.length;
@@ -302,5 +401,6 @@ export function summarizeCounts(content: EnumeratedContent): {
     journalPages,
     items: content.items.length,
     scenes: content.scenes.length,
+    actors: content.actors.length,
   };
 }
