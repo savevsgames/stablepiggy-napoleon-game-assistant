@@ -1,0 +1,154 @@
+# Release-image workflow — builds and publishes the napoleon-foundry
+# Docker image + the Foundry marketplace artifacts on every vX.Y.Z tag.
+#
+# See FOUNDRY-HARNESS-V2 spec §6 + §7 (in the DevVault MCP repo) for
+# design rationale. The single responsibility chain on tag-push:
+#
+#   1. Verify module.json version matches the tag (catches "I tagged
+#      v0.5.1 but forgot to bump module.json")
+#   2. Build the module (npm ci + protocol + module — same as build.yml,
+#      done locally in this job to avoid coupling to build.yml's
+#      separate dist/scripts commit cycle)
+#   3. Build the napoleon-foundry image with --build-arg MODULE_VERSION
+#      so the IMAGE_VERSION marker inside the image equals the tag
+#   4. Login to Docker Hub via DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
+#      repo secrets
+#   5. Push savevsgames/napoleon-foundry:${TAG} + :latest
+#   6. Assemble module.zip with the marketplace-required files
+#   7. Create a GitHub Release at the tag with module.json + module.zip
+#      attached. Foundry's marketplace install path uses the
+#      "releases/latest/download/module.json" URL pattern, so the
+#      latest-floating manifest URL keeps pointing at whatever this
+#      workflow most recently published.
+#
+# The tag-trigger pattern is "v*.*.*" (full semver only) so a hand-typed
+# "draft-tag" or "test" tag doesn't fire the publish path. Pre-release
+# tags like v0.5.0-rc.1 also won't match — intentional, since pre-
+# releases shouldn't go to the marketplace as the latest version.
+
+name: Release napoleon-foundry image + marketplace artifacts
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write  # for creating GitHub Releases
+
+# Don't run two release workflows for the same tag concurrently. If
+# someone re-pushes a tag (force-update), the second run waits for the
+# first; we don't cancel because a half-published release is worse than
+# a queued one.
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout at tag
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Strip the leading 'v' so we can compare against module.json's
+          # version field (which doesn't carry a 'v' prefix).
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify module.json version matches tag
+        run: |
+          MODULE_VERSION=$(node -p "require('./module.json').version")
+          EXPECTED="${{ steps.version.outputs.version }}"
+          if [ "${MODULE_VERSION}" != "${EXPECTED}" ]; then
+            echo "module.json version (${MODULE_VERSION}) does not match tag (${EXPECTED})"
+            echo "Bump module.json's version field to match the tag before pushing the tag."
+            exit 1
+          fi
+          echo "module.json version matches tag: ${MODULE_VERSION}"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build protocol
+        run: npm run build:protocol
+
+      - name: Build module
+        run: npm run build:module
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push napoleon-foundry image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/foundry/Dockerfile
+          push: true
+          tags: |
+            savevsgames/napoleon-foundry:${{ steps.version.outputs.tag }}
+            savevsgames/napoleon-foundry:latest
+          build-args: |
+            MODULE_VERSION=${{ steps.version.outputs.tag }}
+          # GHA cache speeds up subsequent builds when only module bytes
+          # change (felddy base layers stay cached).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Assemble marketplace module.zip
+        run: |
+          # Foundry's marketplace install path expects a flat zip with
+          # module.json at the root. Include only files referenced by
+          # module.json (esmodules, styles, languages) plus README.md
+          # + LICENSE for compliance with the marketplace publishing
+          # guidelines.
+          mkdir -p release-assets
+          zip -r release-assets/module.zip \
+            module.json \
+            dist/scripts \
+            styles \
+            languages \
+            README.md \
+            LICENSE
+          # Copy module.json alongside so the GitHub Release surfaces
+          # both files at "releases/latest/download/module.json" and
+          # "releases/latest/download/module.zip" — Foundry's manifest
+          # URL pattern fetches module.json first, reads the `download`
+          # field, fetches the zip.
+          cp module.json release-assets/module.json
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          files: |
+            release-assets/module.json
+            release-assets/module.zip
+          # generate_release_notes pulls commit messages between the
+          # previous tag and this one. Keeps the release page useful
+          # without requiring a hand-written CHANGELOG entry per tag.
+          generate_release_notes: true
+          # Don't auto-publish as a draft — we want this release LIVE
+          # so Foundry's manifest URL resolves immediately.
+          draft: false
+          prerelease: false

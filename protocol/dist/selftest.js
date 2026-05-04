@@ -99,6 +99,30 @@ function validQueryPayload() {
         },
     };
 }
+function validWorldContent() {
+    return {
+        actors: [
+            { id: "actor-1", name: "Drowned Guard", type: "npc", level: 2, folder: "Chapter 2" },
+            { id: "actor-2", name: "GM Notes", type: "loot" },
+        ],
+        scenes: [
+            { id: "scene-1", name: "A1 — Gauntlight Keep", active: true, folder: "Chapter 1" },
+            { id: "scene-2", name: "B3 — The Drowned Hall", active: false },
+        ],
+        journals: [
+            { id: "journal-1", name: "Chapter 1 Overview", folder: "Chapter 1", pageCount: 4 },
+            { id: "journal-2", name: "Errata Notes" },
+        ],
+        items: [
+            { id: "item-1", name: "+1 Striking Rapier", type: "weapon" },
+            { id: "item-2", name: "Healing Potion", type: "consumable", folder: "Loot" },
+        ],
+        modules: [
+            { id: "pf2e.abomination-vaults", title: "Pathfinder Adventure Path: Abomination Vaults", active: true, version: "2.1.0" },
+            { id: "pf2e", title: "Pathfinder 2e", active: true },
+        ],
+    };
+}
 function validChatCreatePayload() {
     return {
         correlationId: null,
@@ -125,6 +149,33 @@ function validJournalCreatePayload() {
                 text: { content: "<p>Session overview.</p>", format: 1 },
             },
         ],
+    };
+}
+function validWallCreatePayload() {
+    return {
+        correlationId: null,
+        c: [100, 200, 100, 400],
+        move: 1,
+        sense: 1,
+        sound: 0,
+        door: 0,
+    };
+}
+function validLightCreatePayload() {
+    return {
+        correlationId: null,
+        x: 500,
+        y: 500,
+        dim: 200,
+        bright: 100,
+    };
+}
+function validSceneUpdatePayload() {
+    return {
+        correlationId: null,
+        globalLight: false,
+        darkness: 0.5,
+        tokenVision: true,
     };
 }
 // ============================================================================
@@ -188,6 +239,106 @@ section("client.query");
         ...badContext,
         context: { ...badContext.context, selectedActorIds: "not-an-array" },
     }), "validation_failed");
+    // V2 Phase 4 — worldContent
+    const queryWithWorld = validQueryPayload();
+    assertAccepts("valid query with populated worldContent", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: { ...queryWithWorld.context, worldContent: validWorldContent() },
+    }));
+    assertAccepts("valid query with worldContent: null (no Foundry session)", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: { ...queryWithWorld.context, worldContent: null },
+    }));
+    assertAccepts("valid query with empty worldContent arrays", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: { actors: [], scenes: [], journals: [], items: [], modules: [] },
+        },
+    }));
+    assertRejects("rejects worldContent.actors with missing id", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: {
+                ...validWorldContent(),
+                actors: [{ name: "Nameless", type: "npc" }],
+            },
+        },
+    }), "validation_failed");
+    assertRejects("rejects worldContent.actors with non-numeric level", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: {
+                ...validWorldContent(),
+                actors: [{ id: "a1", name: "Bad Level", type: "npc", level: "two" }],
+            },
+        },
+    }), "validation_failed");
+    assertRejects("rejects worldContent.scenes with non-boolean active", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: {
+                ...validWorldContent(),
+                scenes: [{ id: "s1", name: "Bad Active", active: "yes" }],
+            },
+        },
+    }), "validation_failed");
+    assertRejects("rejects worldContent missing the journals array", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: {
+                actors: [],
+                scenes: [],
+                items: [],
+                modules: [],
+            },
+        },
+    }), "validation_failed");
+    assertRejects("rejects worldContent.modules with missing title", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: {
+                ...validWorldContent(),
+                modules: [{ id: "pf2e.av", active: true }],
+            },
+        },
+    }), "validation_failed");
+    // V2 Phase 4 Commit 5e — module.version is optional but must be a string when present.
+    assertAccepts("valid worldContent with module.version present", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: {
+                ...validWorldContent(),
+                modules: [{ id: "pf2e.av", title: "AV", active: true, version: "3.0.0" }],
+            },
+        },
+    }));
+    assertAccepts("valid worldContent with module.version omitted", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: {
+                ...validWorldContent(),
+                modules: [{ id: "pf2e.av", title: "AV", active: true }],
+            },
+        },
+    }));
+    assertRejects("rejects worldContent.modules with non-string version", makeMessage("client.query", {
+        ...queryWithWorld,
+        context: {
+            ...queryWithWorld.context,
+            worldContent: {
+                ...validWorldContent(),
+                modules: [{ id: "pf2e.av", title: "AV", active: true, version: 3 }],
+            },
+        },
+    }), "validation_failed");
 }
 section("backend.chat.create");
 {
@@ -221,6 +372,179 @@ section("backend.journal.create");
                 text: { content: "x", format: 2 },
             },
         ],
+    }), "validation_failed");
+}
+section("backend.wall.create (V2 Phase 3)");
+{
+    assertAccepts("valid wall.create", makeMessage("backend.wall.create", validWallCreatePayload()));
+    const badCoords = validWallCreatePayload();
+    assertRejects("rejects wall.create with c of wrong length", makeMessage("backend.wall.create", { ...badCoords, c: [1, 2, 3] }), "validation_failed");
+    assertRejects("rejects wall.create with move=2 (only 0 or 1 allowed)", makeMessage("backend.wall.create", { ...validWallCreatePayload(), move: 2 }), "validation_failed");
+    assertRejects("rejects wall.create with door=3 (only 0, 1, or 2 allowed)", makeMessage("backend.wall.create", { ...validWallCreatePayload(), door: 3 }), "validation_failed");
+}
+section("backend.light.create (V2 Phase 3)");
+{
+    assertAccepts("valid light.create", makeMessage("backend.light.create", validLightCreatePayload()));
+    assertRejects("rejects light.create with bright > dim", makeMessage("backend.light.create", { ...validLightCreatePayload(), dim: 50, bright: 100 }), "validation_failed");
+    assertRejects("rejects light.create with negative dim", makeMessage("backend.light.create", { ...validLightCreatePayload(), dim: -10 }), "validation_failed");
+    assertRejects("rejects light.create with angle > 360", makeMessage("backend.light.create", { ...validLightCreatePayload(), angle: 361 }), "validation_failed");
+}
+section("backend.scene.update (V2 Phase 3)");
+{
+    assertAccepts("valid scene.update", makeMessage("backend.scene.update", validSceneUpdatePayload()));
+    assertAccepts("valid scene.update with only sceneName + single field", makeMessage("backend.scene.update", { correlationId: null, sceneName: "market-square", darkness: 0.3 }));
+    assertRejects("rejects scene.update with no update fields (no-op guard)", makeMessage("backend.scene.update", { correlationId: null }), "validation_failed");
+    assertRejects("rejects scene.update with darkness > 1", makeMessage("backend.scene.update", { ...validSceneUpdatePayload(), darkness: 1.5 }), "validation_failed");
+}
+function validModuleContentRequestPayload() {
+    return {
+        correlationId: "ingest-correl-1",
+        adventureId: "abomination-vaults",
+        packKeys: ["pf2e-abomination-vaults.av", "pf2e.abomination-vaults-bestiary"],
+        versionManifestId: "pf2e-abomination-vaults",
+    };
+}
+function validModuleContentResponsePayload() {
+    return {
+        correlationId: "ingest-correl-1",
+        adventureId: "abomination-vaults",
+        journals: [
+            {
+                id: "j1",
+                name: "Volume 1: Ruins of Gauntlight",
+                folder: "Abomination Vaults",
+                pages: [
+                    { id: "p1", name: "A01. Tarwynn Bridge", contentHtml: "<p>...</p>", sort: 100 },
+                    { id: "p10", name: "A10. Mudlicker Throne Room", contentHtml: "<p>...</p>", sort: 1000 },
+                ],
+            },
+        ],
+        items: [
+            { id: "i1", name: "+1 Striking Rapier", type: "weapon", descriptionHtml: "<p>...</p>", folder: "Loot" },
+        ],
+        scenes: [
+            { id: "s1", name: "A — Gauntlight Ruins", folder: "Chapter 1" },
+        ],
+        version: "2.1.0",
+        counts: { journalEntries: 1, journalPages: 2, items: 1, scenes: 1 },
+    };
+}
+section("backend.module_content.request (V2 Phase 4 Commit 5b)");
+{
+    assertAccepts("valid module_content.request", makeMessage("backend.module_content.request", validModuleContentRequestPayload()));
+    assertRejects("rejects module_content.request with empty packKeys", makeMessage("backend.module_content.request", { ...validModuleContentRequestPayload(), packKeys: [] }), "validation_failed");
+    assertRejects("rejects module_content.request with non-string packKey entry", makeMessage("backend.module_content.request", {
+        ...validModuleContentRequestPayload(),
+        packKeys: ["valid.pack", 42],
+    }), "validation_failed");
+    assertRejects("rejects module_content.request with missing versionManifestId", makeMessage("backend.module_content.request", {
+        correlationId: "c1",
+        adventureId: "abomination-vaults",
+        packKeys: ["pf2e-abomination-vaults.av"],
+    }), "validation_failed");
+}
+section("client.module_content.response (V2 Phase 4 Commit 5b)");
+{
+    assertAccepts("valid module_content.response (full AV-shaped payload)", makeMessage("client.module_content.response", validModuleContentResponsePayload()));
+    assertAccepts("valid module_content.response with empty arrays", makeMessage("client.module_content.response", {
+        correlationId: "c1",
+        adventureId: "abomination-vaults",
+        journals: [],
+        items: [],
+        scenes: [],
+        version: "1.0.0",
+        counts: { journalEntries: 0, journalPages: 0, items: 0, scenes: 0 },
+    }));
+    assertRejects("rejects response with non-array journals", makeMessage("client.module_content.response", {
+        ...validModuleContentResponsePayload(),
+        journals: "not an array",
+    }), "validation_failed");
+    assertRejects("rejects response with journal page missing sort", makeMessage("client.module_content.response", {
+        ...validModuleContentResponsePayload(),
+        journals: [
+            {
+                id: "j1",
+                name: "Vol 1",
+                pages: [{ id: "p1", name: "A01", contentHtml: "" }],
+            },
+        ],
+    }), "validation_failed");
+    assertRejects("rejects response with negative count", makeMessage("client.module_content.response", {
+        ...validModuleContentResponsePayload(),
+        counts: { journalEntries: -1, journalPages: 0, items: 0, scenes: 0 },
+    }), "validation_failed");
+    assertRejects("rejects response with item missing type", makeMessage("client.module_content.response", {
+        ...validModuleContentResponsePayload(),
+        items: [{ id: "i1", name: "Mystery Item" }],
+    }), "validation_failed");
+    // V2 Phase 4 Commit 6 — pins on scenes + bestiary actors.
+    assertAccepts("valid module_content.response with scene pins", makeMessage("client.module_content.response", {
+        ...validModuleContentResponsePayload(),
+        scenes: [
+            {
+                id: "s1",
+                name: "A — Gauntlight Ruins",
+                folder: "Chapter 1",
+                pins: [
+                    { id: "n1", entryId: "j1", pageId: "p10", label: "A10", x: 1200, y: 800 },
+                    { id: "n2", entryId: "j1", pageId: "p1", label: "A01" },
+                ],
+            },
+        ],
+    }));
+    assertAccepts("valid module_content.response with bestiary actors + counts.actors", makeMessage("client.module_content.response", {
+        ...validModuleContentResponsePayload(),
+        actors: [
+            { id: "a1", name: "Boss Skrawng", type: "npc", descriptionHtml: "<p>...</p>", folder: "Mudlickers" },
+            { id: "a2", name: "Mitflit", type: "npc" },
+        ],
+        counts: { journalEntries: 1, journalPages: 2, items: 1, scenes: 1, actors: 2 },
+    }));
+    assertRejects("rejects response with pin missing entryId", makeMessage("client.module_content.response", {
+        ...validModuleContentResponsePayload(),
+        scenes: [
+            {
+                id: "s1",
+                name: "A — Gauntlight Ruins",
+                pins: [{ id: "n1", label: "A10" }],
+            },
+        ],
+    }), "validation_failed");
+    assertRejects("rejects response with actor missing type", makeMessage("client.module_content.response", {
+        ...validModuleContentResponsePayload(),
+        actors: [{ id: "a1", name: "Mystery NPC" }],
+    }), "validation_failed");
+}
+function validAdventureIngestionRequest() {
+    return {
+        correlationId: "ingest-button-1",
+        adventureId: "abomination-vaults",
+        campaignId: "savevsgreg-av",
+    };
+}
+function validAdventureIngestionDecline() {
+    return {
+        correlationId: "decline-button-1",
+        adventureId: "abomination-vaults",
+        campaignId: "savevsgreg-av",
+    };
+}
+section("client.adventure_ingestion_request (V2 Phase 4 Commit 5d)");
+{
+    assertAccepts("valid adventure_ingestion_request", makeMessage("client.adventure_ingestion_request", validAdventureIngestionRequest()));
+    assertRejects("rejects with empty adventureId", makeMessage("client.adventure_ingestion_request", { ...validAdventureIngestionRequest(), adventureId: "" }), "validation_failed");
+    assertRejects("rejects with missing campaignId", makeMessage("client.adventure_ingestion_request", {
+        correlationId: "c1",
+        adventureId: "abomination-vaults",
+    }), "validation_failed");
+}
+section("client.adventure_ingestion_decline_request (V2 Phase 4 Commit 5d)");
+{
+    assertAccepts("valid adventure_ingestion_decline_request", makeMessage("client.adventure_ingestion_decline_request", validAdventureIngestionDecline()));
+    assertRejects("rejects with empty correlationId", makeMessage("client.adventure_ingestion_decline_request", { ...validAdventureIngestionDecline(), correlationId: "" }), "validation_failed");
+    assertRejects("rejects with non-string campaignId", makeMessage("client.adventure_ingestion_decline_request", {
+        ...validAdventureIngestionDecline(),
+        campaignId: 42,
     }), "validation_failed");
 }
 section("error");
