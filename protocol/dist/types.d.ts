@@ -71,7 +71,7 @@ export declare class ProtocolError extends Error {
  * the `ProtocolMessage` union — `switch (msg.kind)` narrows the payload type
  * automatically.
  */
-export type MessageKind = "client.hello" | "relay.welcome" | "client.query" | "client.session_event" | "backend.chat.create" | "backend.actor.create" | "backend.actor.update" | "backend.journal.create" | "backend.rolltable.create" | "ping" | "pong" | "error";
+export type MessageKind = "client.hello" | "relay.welcome" | "client.query" | "client.session_event" | "client.data_upload_ack" | "client.world_save_request" | "client.module_content.response" | "client.adventure_ingestion_request" | "client.adventure_ingestion_decline_request" | "backend.chat.create" | "backend.actor.create" | "backend.actor.update" | "backend.journal.create" | "backend.rolltable.create" | "backend.scene.create" | "backend.scene.update" | "backend.token.create" | "backend.wall.create" | "backend.light.create" | "backend.data.upload" | "backend.module_content.request" | "ping" | "pong" | "error";
 /**
  * Common envelope for all protocol messages. Every message on the wire has
  * these fields plus a kind-specific `payload`. The generic parameter `K`
@@ -108,6 +108,18 @@ export interface ClientCapabilities {
     readonly journalCreate: boolean;
     /** Module can create roll tables via `backend.rolltable.create`. */
     readonly rolltableCreate?: boolean;
+    /** Module can create scenes via `backend.scene.create`. */
+    readonly sceneCreate?: boolean;
+    /** Module can place tokens on scenes via `backend.token.create`. */
+    readonly tokenCreate?: boolean;
+    /** Module can place walls on scenes via `backend.wall.create` (V2 Phase 3). */
+    readonly wallCreate?: boolean;
+    /** Module can place ambient lights on scenes via `backend.light.create` (V2 Phase 3). */
+    readonly lightCreate?: boolean;
+    /** Module can apply scene-level updates via `backend.scene.update` (V2 Phase 3). */
+    readonly sceneUpdate?: boolean;
+    /** Module can persist Barn files to Foundry Data via `backend.data.upload` (Phase B.4 durability). */
+    readonly dataUpload?: boolean;
     /** Foundry system module ID, e.g. "pf2e". */
     readonly systemId: string;
     /** Foundry system module version, e.g. "7.12.1". */
@@ -198,9 +210,132 @@ export interface RelayWelcomePayload {
  * empty or minimal context; Tier 2 starts populating the scene and combat
  * fields for tactical assist features.
  */
+/**
+ * Scene dimensional data (V2 Phase 3 addition). Foundry's scene
+ * coordinate space includes a padding ring around the image, so
+ * pixel (0, 0) in scene space is the top-left of the PADDED canvas,
+ * NOT the top-left of the visible background image. Napoleon needs
+ * the image's actual bounds (sceneX/sceneY/sceneWidth/sceneHeight
+ * from Foundry's scene.dimensions) to place walls, lights, and
+ * tokens on the map instead of in the padding margin.
+ *
+ * All values in scene pixels. Sourced from `game.scenes.current.dimensions`
+ * which Foundry V13 computes per scene.
+ */
+export interface SceneDimensions {
+    /** X pixel where the background image starts inside the padded canvas. */
+    readonly imageX: number;
+    /** Y pixel where the background image starts inside the padded canvas. */
+    readonly imageY: number;
+    /** Image width in pixels. */
+    readonly imageWidth: number;
+    /** Image height in pixels. */
+    readonly imageHeight: number;
+    /** Full padded canvas width (image + padding on both sides). */
+    readonly totalWidth: number;
+    /** Full padded canvas height. */
+    readonly totalHeight: number;
+    /** Grid cell size in pixels. */
+    readonly gridSize: number;
+}
+/**
+ * V2 Phase 4 — Module-Aware Napoleon. Compact summaries of the Foundry
+ * world's existing content so Napoleon can reference module-provided
+ * actors / scenes / journals / items by NAME instead of hallucinating
+ * duplicates. Module enumerates this on every `client.query` send when
+ * a Foundry session is connected; the backend injects a "## Current
+ * world contents" block into the composed user message.
+ *
+ * Summaries only — full documents stay out of the prompt budget.
+ * Phase 4b will add deep-read tools that fetch a single full document
+ * on demand when Napoleon needs more than a summary.
+ *
+ * Per-type entry caps are enforced module-side at enumeration time
+ * (defaults: actors 300, scenes 75, journals 250, items 200, modules
+ * 50; configurable per spec §10 Q4). Folder names are included so
+ * Napoleon can scope answers to a chapter / area folder.
+ */
+export interface WorldContentActor {
+    readonly id: string;
+    readonly name: string;
+    /** Foundry actor type — 'character' | 'npc' | 'loot' | 'vehicle' | 'hazard' | etc. */
+    readonly type: string;
+    readonly level?: number;
+    readonly folder?: string;
+}
+export interface WorldContentScene {
+    readonly id: string;
+    readonly name: string;
+    /** Whether this scene is the currently-viewed/active scene. */
+    readonly active: boolean;
+    readonly folder?: string;
+}
+export interface WorldContentJournal {
+    readonly id: string;
+    readonly name: string;
+    readonly folder?: string;
+    readonly pageCount?: number;
+}
+export interface WorldContentItem {
+    readonly id: string;
+    readonly name: string;
+    /** Foundry item type — 'weapon' | 'armor' | 'consumable' | etc. */
+    readonly type: string;
+    readonly folder?: string;
+}
+export interface WorldContentModule {
+    /** Foundry manifest id — e.g. `pf2e.abomination-vaults`. */
+    readonly id: string;
+    readonly title: string;
+    readonly active: boolean;
+    /**
+     * V2 Phase 4 Commit 5e — installed version string from
+     * `game.modules.get(id).version`. Optional for backward compat
+     * with module bundles that predate this commit; the backend's
+     * major-version-upgrade detection silently skips entries where
+     * version is missing or unparseable. Schema-shape: any string;
+     * format is whatever the module's manifest declares (commonly
+     * semver, but Paizo and others occasionally ship `"3.0"` or
+     * `"v2.1.0-beta"` or even `"2024.07"`).
+     */
+    readonly version?: string;
+}
+export interface WorldContent {
+    readonly actors: readonly WorldContentActor[];
+    readonly scenes: readonly WorldContentScene[];
+    readonly journals: readonly WorldContentJournal[];
+    readonly items: readonly WorldContentItem[];
+    readonly modules: readonly WorldContentModule[];
+}
 export interface QueryContext {
     /** Currently-active scene ID in Foundry, or null if none. */
     readonly sceneId: string | null;
+    /**
+     * Currently-active scene name in Foundry (V2 Phase 3 addition). When
+     * present, the backend injects it into the composed user message so
+     * Napoleon knows which scene the GM is looking at — required for
+     * scene-modification intents ("add walls here") to target the right
+     * scene instead of the last one Napoleon remembers.
+     */
+    readonly sceneName?: string | null;
+    /**
+     * Currently-active scene's computed dimensions (V2 Phase 3). Lets
+     * the backend tell Napoleon where the image actually sits in the
+     * padded scene canvas so walls/lights target the visible map, not
+     * the padding. Omitted on modules that predate the addition; omitted
+     * when no scene is active (even on up-to-date modules).
+     */
+    readonly sceneDimensions?: SceneDimensions | null;
+    /**
+     * V2 Phase 4 — Module-Aware Napoleon. Compact summaries of the
+     * Foundry world's actors, scenes, journals, items, and installed
+     * modules so Napoleon can reference existing content by NAME instead
+     * of hallucinating duplicates. Populated by the module on every
+     * `client.query` when a Foundry session is connected; null/omitted
+     * for non-Foundry callers (dashboard chat, etc.). See WorldContent
+     * for the full shape.
+     */
+    readonly worldContent?: WorldContent | null;
     /** IDs of actors currently selected by the GM. */
     readonly selectedActorIds: readonly string[];
     /** Whether the combat tracker is open and in an active combat. */
@@ -211,6 +346,60 @@ export interface QueryContext {
      * populating it with the last N messages.
      */
     readonly recentChat: readonly string[];
+}
+/**
+ * Optional canvas snapshot attached to a `client.query`. The module captures
+ * the current viewport of `canvas.stage` when a scene is active and the
+ * backend's current model supports image input. Backend-side gating (via
+ * `providers.config.ts::modelFlags.supportsImageInput`) discards the
+ * snapshot if the active model can't consume it — the module currently
+ * sends optimistically.
+ *
+ * The capture is the GM's current viewport, NOT the full scene — if the
+ * GM has panned to a corner, that's what the LLM sees. Reset pan/zoom
+ * before querying for full-scene context.
+ *
+ * Stored by the backend via `captures.ts` with `provenance='user_captured'`,
+ * `share_scope='org'` by default (party visibility for tactical snapshots).
+ * 5-min signed URL TTL.
+ */
+export interface ClientQuerySnapshot {
+    /** Full data URL: `data:image/jpeg;base64,...`. JPEG default for size, PNG available. */
+    readonly dataUrl: string;
+    /** Pixel dimensions of the captured viewport. */
+    readonly width: number;
+    readonly height: number;
+    /** Scene's grid cell size in pixels. Lets the backend map px → grid for placement. */
+    readonly gridSize: number;
+    /** The scene the snapshot was taken from. */
+    readonly sceneId: string;
+    /** GM-friendly scene name for log + cache key context. */
+    readonly sceneName: string;
+}
+/**
+ * Categories used under `Data/worlds/<world>/napoleon/<category>/` for
+ * persisted Foundry world data (Phase B.4). Bounded set — if the GM has
+ * content that doesn't fit the named slots, it goes in `gm/` as a
+ * catch-all. Napoleon browses this tree via `worldFiles` on every query.
+ */
+export declare const WORLD_FILE_CATEGORIES: readonly ["npcs", "scenes", "maps", "items", "journals", "gm"];
+export type WorldFileCategory = (typeof WORLD_FILE_CATEGORIES)[number];
+/**
+ * Metadata about a single file the module discovered under
+ * `worlds/<world>/napoleon/` via `FilePicker.browse`. Sent alongside
+ * `client.query` so Napoleon can reuse existing assets instead of
+ * regenerating (the 80/20 "this feels magic" feature). Capped at 1000
+ * entries per query — worlds with more get truncated + a warn log.
+ */
+export interface ClientWorldFile {
+    /** Data-relative path, e.g. `"worlds/otari-pub/napoleon/npcs/pippa.png"`. */
+    readonly path: string;
+    /** Which subfolder the file was found in. */
+    readonly category: WorldFileCategory;
+    /** Filename without extension, e.g. `"pippa"`. Used as the reuse key. */
+    readonly slug: string;
+    /** File size in bytes. Informational only. */
+    readonly sizeBytes: number;
 }
 /**
  * Payload for `client.query`. The module sends this when the GM types
@@ -229,6 +418,20 @@ export interface ClientQueryPayload {
     readonly query: string;
     /** Optional structured Foundry state at query time. */
     readonly context: QueryContext;
+    /**
+     * Optional viewport snapshot for vision-capable LLMs. Included when
+     * `canvas.scene` is active AND the module has reason to believe the
+     * active model can consume images. Backend discards silently if the
+     * resolved model does not support image input.
+     */
+    readonly snapshot?: ClientQuerySnapshot;
+    /**
+     * Existing Foundry Data files under `worlds/<world>/napoleon/` so
+     * Napoleon can reuse them before generating new content. Discovered
+     * by the module via `FilePicker.browse` at send time. Capped at
+     * 1000 entries; module truncates beyond that and warns in its log.
+     */
+    readonly worldFiles?: readonly ClientWorldFile[];
 }
 /**
  * The chat message type enumeration, matching Foundry's `CONST.CHAT_MESSAGE_TYPES`.
@@ -318,6 +521,192 @@ export interface BackendRollTableCreatePayload {
     }>;
 }
 /**
+ * Payload for `backend.token.create`. The backend sends this to place
+ * a token of an existing Actor onto a Scene — typically after NPC
+ * creation when the GM asked to "spawn" or "place" them on the map.
+ * Coordinates default to grid cells (easier for an LLM to reason about:
+ * "put the goblin at grid 5,3" maps cleanly to the tactical layout).
+ * Coordinates in pixels are supported via coordMode: "px" for cases
+ * where the caller already has precise placement data.
+ *
+ * Defaults:
+ *   - sceneId omitted → place on the currently active scene
+ *   - coordMode omitted → "grid" (convert via scene.grid.size)
+ *   - disposition omitted → 0 (neutral)
+ *   - hidden omitted → false (visible to players)
+ */
+export interface BackendTokenCreatePayload {
+    /** The message ID of the originating client.query, if any. */
+    readonly correlationId: string | null;
+    /** Name of the Actor to spawn a token of (must already exist in Foundry's Actors sidebar). */
+    readonly actorName: string;
+    /** X coordinate (grid cell if coordMode is "grid", pixels if "px"). */
+    readonly x: number;
+    /** Y coordinate (grid cell if coordMode is "grid", pixels if "px"). */
+    readonly y: number;
+    /** Coordinate interpretation. Default: "grid". */
+    readonly coordMode?: "grid" | "px";
+    /** Target scene ID. Default: currently active scene. */
+    readonly sceneId?: string;
+    /** Token disposition: -1 hostile, 0 neutral, 1 friendly. Default: 0. */
+    readonly disposition?: -1 | 0 | 1;
+    /** If true, token is hidden from players on placement. Default: false. */
+    readonly hidden?: boolean;
+}
+/**
+ * Payload for `backend.scene.create`. The backend sends this to create
+ * a Scene document — typically after generating a map image with
+ * `image_generate`. Phase B.1 defaults are deliberately minimal: no
+ * vision rules, no fog, global light on, no walls/lights/tokens. GMs
+ * get a usable scene with zero manual configuration. Phase C+ will
+ * layer vision/fog/walls on top as capabilities mature.
+ */
+export interface BackendSceneCreatePayload {
+    /** The message ID of the originating client.query, if any. */
+    readonly correlationId: string | null;
+    /** Scene title shown in the nav bar. */
+    readonly name: string;
+    /** Public HTTPS URL for the scene's background image (typically a signed Barn URL). */
+    readonly img: string;
+    /** Scene canvas width in pixels. Typically matches the generated image's width. */
+    readonly width: number;
+    /** Scene canvas height in pixels. Typically matches the generated image's height. */
+    readonly height: number;
+    /** Grid cell size in pixels. Default: 100. */
+    readonly gridSize?: number;
+    /** In-game distance represented by one grid cell. Default: 5 (PF2e ft). */
+    readonly gridDistance?: number;
+    /** Unit label for grid distance. Default: "ft". */
+    readonly gridUnits?: string;
+    /** Show the scene in the nav bar. Default: true. */
+    readonly navigation?: boolean;
+    /** Activate (view) the scene immediately after creation. Default: true. */
+    readonly openAfterCreate?: boolean;
+}
+/**
+ * Payload for `backend.wall.create` (V2 Phase 3). The backend sends this
+ * to place a single wall segment on a Scene — typically as part of a
+ * batch emitted during adventure import or scene-blueprint enrichment.
+ * Coordinates are scene pixels (NOT grid cells), matching Foundry's
+ * internal Wall document shape.
+ *
+ * Defaults (if the flag is omitted):
+ *   - move: 1 (blocks movement)
+ *   - sense: 1 (blocks line-of-sight)
+ *   - sound: 0 (pass-through)
+ *   - door: 0 (plain wall, not a door)
+ *   - sceneName omitted → module uses the currently-active scene
+ *
+ * Doors (door > 0) still carry their own move/sense/sound flags so the
+ * backend can emit a "secret door that blocks sound" if it wants.
+ */
+export interface BackendWallCreatePayload {
+    /** The message ID of the originating client.query, if any. */
+    readonly correlationId: string | null;
+    /**
+     * Endpoint coordinates [x1, y1, x2, y2]. Interpretation depends on
+     * `coordMode`: "image" (default) = image-local pixels with (0,0) at
+     * the visible image's top-left; module adds sceneX/sceneY offset.
+     * "scene" = raw absolute scene pixels including padding; module
+     * passes through unchanged.
+     */
+    readonly c: readonly [number, number, number, number];
+    /** Movement restriction: 0 = pass-through, 1 = blocks movement. */
+    readonly move: number;
+    /** Line-of-sight restriction: 0 = see-through, 1 = blocks vision. */
+    readonly sense: number;
+    /** Sound propagation: 0 = pass-through, 1 = blocks sound. */
+    readonly sound: number;
+    /** Door type: 0 = plain wall, 1 = door, 2 = secret door. */
+    readonly door: number;
+    /**
+     * Coordinate space for `c`. Default "image" — module adds the
+     * scene's image offset (`scene.dimensions.sceneX/sceneY`) before
+     * creating the Wall document, so Napoleon can reason about walls
+     * in image-local space without doing offset math. "scene" passes
+     * coords through unchanged (padding-inclusive absolute pixels).
+     */
+    readonly coordMode?: "image" | "scene";
+    /** Target scene name (as given to `backend.scene.create`). Optional — default: active scene. */
+    readonly sceneName?: string;
+}
+/**
+ * Payload for `backend.light.create` (V2 Phase 3). Places an AmbientLight
+ * embedded document on a scene. Coordinates are scene pixels. `bright`
+ * is the inner fully-lit radius; `dim` is the outer dim-light radius
+ * (must be >= bright). `angle` defaults to 360 (omnidirectional); set
+ * smaller for a directional lantern and use `rotation` to aim it.
+ *
+ * Light only produces visible effect when the scene's globalLight is
+ * off — the adventure importer typically emits `backend.scene.update`
+ * with globalLight=false alongside a batch of `backend.light.create`.
+ */
+export interface BackendLightCreatePayload {
+    /** The message ID of the originating client.query, if any. */
+    readonly correlationId: string | null;
+    /** Light position X. Interpretation depends on coordMode (default "image"). */
+    readonly x: number;
+    /** Light position Y. Interpretation depends on coordMode (default "image"). */
+    readonly y: number;
+    /** Outer dim-light radius in pixels (unit-less; no offset transform). Must be >= bright. */
+    readonly dim: number;
+    /** Inner bright-light radius in pixels (fully lit). */
+    readonly bright: number;
+    /** Cone angle in degrees (0-360). Default: 360 (omnidirectional). */
+    readonly angle?: number;
+    /** Cone rotation in degrees, meaningful when angle < 360. Default: 0. */
+    readonly rotation?: number;
+    /** Hex color string (e.g. "#ff8800"). Default/null: Foundry's white. */
+    readonly color?: string | null;
+    /**
+     * Coordinate space for `x, y`. Default "image" — module adds
+     * sceneX/sceneY offset. "scene" = raw absolute scene pixels. See
+     * BackendWallCreatePayload.coordMode for the full convention.
+     */
+    readonly coordMode?: "image" | "scene";
+    /** Target scene name. Optional — default: active scene. */
+    readonly sceneName?: string;
+}
+/**
+ * Payload for `backend.scene.update` (V2 Phase 3). Targets an existing
+ * scene and applies any subset of the optional fields; omitted fields
+ * are left untouched.
+ *
+ * Fields use the backend's snake-tolerant camelCase shape; the module's
+ * handler maps to Foundry V13's actual document paths — most notably
+ * `darkness` → `environment.darknessLevel` and `globalLight` →
+ * `environment.globalLight.enabled`. Getting that nesting wrong
+ * produces a silent no-op rather than a thrown error (Foundry drops
+ * unknown keys without complaint), which is why this payload's shape
+ * is deliberately narrow: one field per knob, all optional, so the
+ * handler's mapping is an obvious 1:1.
+ *
+ * Typical use: after `backend.scene.create` (which ships flat-lit
+ * defaults) + a batch of `backend.wall.create` / `backend.light.create`,
+ * emit a scene.update with globalLight=false + tokenVision=true to
+ * activate the vision system the walls gate.
+ */
+export interface BackendSceneUpdatePayload {
+    /** The message ID of the originating client.query, if any. */
+    readonly correlationId: string | null;
+    /** Target scene name. Optional — default: active scene. */
+    readonly sceneName?: string;
+    /** Whether the scene is globally lit (ignoring light sources). */
+    readonly globalLight?: boolean;
+    /** Darkness level 0.0 (full daylight) to 1.0 (pitch black). */
+    readonly darkness?: number;
+    /** Whether token-based vision is enforced (false = all tokens see everything). */
+    readonly tokenVision?: boolean;
+    /** Grid cell size in pixels. */
+    readonly gridSize?: number;
+    /** In-game distance per grid cell. */
+    readonly gridDistance?: number;
+    /** Unit label for grid distance. */
+    readonly gridUnits?: string;
+    /** Show the scene in the nav bar. */
+    readonly navigation?: boolean;
+}
+/**
  * A single page in a `backend.journal.create` message. Tier 1 supports
  * text pages only; Tier 2 adds image, PDF, and video pages.
  */
@@ -348,6 +737,111 @@ export interface BackendJournalCreatePayload {
     readonly pages: readonly JournalPageCreate[];
     /** Optional folder ID to place the new journal entry in. */
     readonly folderId?: string;
+}
+/**
+ * A backend.* command that the module should execute AFTER a successful
+ * `backend.data.upload`. Typically the entity-create/update that needed
+ * the newly-persisted Data path as its `img` field. The module rewrites
+ * the `img` field (or equivalent) to the upload target before dispatching.
+ *
+ * NOT a full protocol envelope — just (kind, payload). The outer
+ * BackendDataUploadMessage provides the envelope fields (v/id/ts).
+ */
+export type BackendFollowUpCommand = {
+    readonly kind: "backend.chat.create";
+    readonly payload: BackendChatCreatePayload;
+} | {
+    readonly kind: "backend.actor.create";
+    readonly payload: BackendActorCreatePayload;
+} | {
+    readonly kind: "backend.actor.update";
+    readonly payload: BackendActorUpdatePayload;
+} | {
+    readonly kind: "backend.journal.create";
+    readonly payload: BackendJournalCreatePayload;
+} | {
+    readonly kind: "backend.rolltable.create";
+    readonly payload: BackendRollTableCreatePayload;
+} | {
+    readonly kind: "backend.scene.create";
+    readonly payload: BackendSceneCreatePayload;
+} | {
+    readonly kind: "backend.token.create";
+    readonly payload: BackendTokenCreatePayload;
+};
+/**
+ * Payload for `backend.data.upload`. Backend sends this when the GM clicks
+ * a "Save to World" button — the module fetches the signed URL bytes and
+ * uploads them to Foundry's Data directory at `targetPath`, then (if
+ * `followUp` is present) dispatches the follow-up command with `img`
+ * rewritten to the Data-relative path.
+ *
+ * Replace-existing collision handling: the module pre-checks the target
+ * path with `FilePicker.browse` and emits a `ui.notifications.info` if
+ * an existing file is being replaced. No versioning / auto-append. See
+ * `local/specs/FOUNDRY-DATA-PERSISTENCE-RFC.md §4` for the rationale.
+ */
+export interface BackendDataUploadPayload {
+    readonly correlationId: string | null;
+    /** Short-lived signed Barn URL the module fetches to get the bytes. 5-min TTL typical. */
+    readonly signedUrl: string;
+    /** Destination path inside Foundry Data, e.g. `"worlds/otari-pub/napoleon/npcs/pippa.png"`. */
+    readonly targetPath: string;
+    /**
+     * Optional command to execute after successful upload. Module rewrites
+     * the `img` field (or `src` for journal pages) to `targetPath` before
+     * dispatching. On upload failure the follow-up is NOT executed — the
+     * GM gets a notification error and the chat preview button stays
+     * available for retry (see Q4 in the RFC).
+     */
+    readonly followUp?: BackendFollowUpCommand;
+}
+/**
+ * Payload for `client.world_save_request`. Module sends this when the GM
+ * clicks a "Save to World" button in chat. The relay forwards it to the
+ * backend's `/my/foundry/world-save` endpoint (supplying session fields
+ * the module doesn't have — worldId, identityId, sessionId come from
+ * the authenticated relay connection state), then pushes each returned
+ * command back as a separate protocol message. From the module's
+ * perspective: send once, let the normal handler dispatch process the
+ * incoming `backend.data.upload` (+ any follow-up).
+ *
+ * See `local/specs/FOUNDRY-DATA-PERSISTENCE-RFC.md §7` (corrected
+ * 2026-04-20) for the full rationale — the original direct-POST
+ * approach would have required opening the backend endpoint to
+ * dv-API-key auth with subdomain CORS complexity.
+ */
+export interface ClientWorldSaveRequestPayload {
+    /** Optional — message ID of the originating client.query, if any. */
+    readonly correlationId?: string;
+    /** Stable session identifier (same value the module passes on client.query). */
+    readonly sessionId: string;
+    /** Barn-relative path of the source file (e.g. `"outputs/generated/xxx.png"`). */
+    readonly barnPath: string;
+    /** Target subfolder under `worlds/<world>/napoleon/`. */
+    readonly category: WorldFileCategory;
+    /** kebab-case filename without extension. Must match `/^[a-z0-9]+(-[a-z0-9]+)*$/`. */
+    readonly slug: string;
+    /** What kind of Foundry entity the upload will be applied to (or `save_only` for pure library add). */
+    readonly targetType: "actor" | "scene" | "token" | "journal" | "save_only";
+    /** Whether the follow-up creates a new entity or updates an existing one. Ignored for `save_only`. */
+    readonly targetAction: "create" | "update";
+    /** Parameters for the follow-up command; shape varies per targetType. Omit for save_only. */
+    readonly params?: Readonly<Record<string, unknown>>;
+}
+/**
+ * Payload for `client.data_upload_ack`. Telemetry ping emitted by the
+ * module after attempting a `backend.data.upload`. Backend logs it for
+ * observability + failure-rate dashboards; no branching logic depends
+ * on it. On `ok: false` the GM has already seen a `ui.notifications.error`
+ * locally — the backend doesn't need to act.
+ */
+export interface ClientDataUploadAckPayload {
+    readonly correlationId: string | null;
+    readonly targetPath: string;
+    readonly ok: boolean;
+    /** Short human-readable failure reason when `ok: false`. Absent when `ok: true`. */
+    readonly error?: string;
 }
 /**
  * The type of notable session event captured by the module's auto-capture
@@ -391,6 +885,227 @@ export interface PongPayload {
     readonly pingId: string;
 }
 /**
+ * Backend → module — request enumeration of an Adventure Path's
+ * compendium pack contents (journals, items, scenes) so the backend
+ * can chunk + embed them into the GM's owner-scoped Trough.
+ *
+ * Pack-key-level granularity, NOT manifest-level — see spec L10/L15.
+ * The bestiary for AV lives at `pf2e.abomination-vaults-bestiary`
+ * which is a subpack of the `pf2e` system module, not the AV module.
+ *
+ * Module-side enumeration is sequential (one pack at a time) to keep
+ * the GM's Foundry tab responsive on AV-class adventures, and emits
+ * a "reading module content" GM-visible whisper before starting.
+ */
+export interface BackendModuleContentRequestPayload {
+    /** Logical adventure key — Trough scope, echoed back in response. */
+    readonly correlationId: string;
+    readonly adventureId: string;
+    /**
+     * Compendium pack keys (`<packageName>.<packName>` format) to
+     * enumerate. Comes from the AP's `contentPackKeys` in
+     * `mcp-server/src/foundry-ap-registry.ts`.
+     */
+    readonly packKeys: readonly string[];
+    /**
+     * Primary detection manifest ID (e.g. `pf2e-abomination-vaults`)
+     * used by the module to look up the AP's installed version via
+     * `game.modules.get(versionManifestId)?.version`. Captured back
+     * into `version` on the response and stored on
+     * `foundry_campaigns.module_ingested_version` for the major-update
+     * detection path.
+     */
+    readonly versionManifestId: string;
+}
+/**
+ * A single page within a JournalEntry document. Foundry V13 journals
+ * are entry-with-pages — each page has its own name + HTML body.
+ */
+export interface ModuleJournalPage {
+    readonly id: string;
+    readonly name: string;
+    /** HTML body from `JournalEntryPage.text.content`. May be empty. */
+    readonly contentHtml: string;
+    /** Sort key from `JournalEntryPage.sort`; lets the backend reconstruct page order. */
+    readonly sort: number;
+}
+/**
+ * One JournalEntry document with its pages enumerated.
+ */
+export interface ModuleJournalEntry {
+    readonly id: string;
+    readonly name: string;
+    readonly folder?: string;
+    readonly pages: readonly ModuleJournalPage[];
+}
+/**
+ * One Item document. `descriptionHtml` is best-effort — system-
+ * specific schema (PF2e: `system.description.value`); modules that
+ * differ may produce empty descriptions, which the backend handles
+ * by ingesting the entry on name + type alone.
+ */
+export interface ModuleItem {
+    readonly id: string;
+    readonly name: string;
+    readonly type: string;
+    readonly descriptionHtml?: string;
+    readonly folder?: string;
+}
+/**
+ * One Actor document — bestiary / NPC entry. `descriptionHtml` is the
+ * lore / public-notes flavour text; mechanical stat blocks are
+ * intentionally NOT carried (those live in Foundry where the GM
+ * drag-drops the actor onto the canvas; quoting mechanics from
+ * training memory was never the goal). Description field varies by
+ * system — module enumerator tries a per-system fallback chain
+ * (pf2e: `system.details.publicNotes`; dnd5e:
+ * `system.details.biography.value`; generic: `system.description.value`)
+ * and uses whatever first yields a non-empty string.
+ *
+ * Added 2026-04-25 (V2 Phase 4 Commit 6) — supersedes the L7 actor-
+ * exclusion rule. The exclusion was originally copyright-driven, and
+ * the user-ingested provenance contract now handles licensing
+ * structurally; lore text on bestiary entries is genuinely useful
+ * for "who is Boss Skrawng?" / "tell me about the Mitflits" queries.
+ */
+export interface ModuleActor {
+    readonly id: string;
+    readonly name: string;
+    /** Actor type per the system (pf2e: "npc"/"character"/"hazard"; 5e: "npc"/"character"; etc.) */
+    readonly type: string;
+    readonly descriptionHtml?: string;
+    readonly folder?: string;
+}
+/**
+ * One Scene summary. Names + folder only — background image refs
+ * intentionally NOT included (per spec L7 ingestion scope: scenes
+ * contribute name + description, not image content). Optional
+ * description is best-effort scraped from module-specific scene
+ * flags.
+ */
+export interface ModuleSceneSummary {
+    readonly id: string;
+    readonly name: string;
+    readonly description?: string;
+    readonly folder?: string;
+    /**
+     * Map pins (Foundry V13 `scene.notes`) — the canonical link between
+     * a scene's image and the journal pages keyed off it. Each pin
+     * carries the journal entry id (and, V13+, an optional page id) so
+     * the backend can resolve "this pin on map A points to journal page
+     * A10. Mudlicker Throne Room" during chunking. Without this, scene
+     * chunks and journal chunks live as siloed data and Napoleon cannot
+     * answer "what's in A10?" by walking from the active scene to its
+     * room journals.
+     *
+     * Optional because: (a) older Foundry adventures may have empty
+     * `scene.notes` collections, and (b) backwards-compatibility with
+     * pre-pins ingestions that still have v1 protocol shape on the
+     * wire.
+     */
+    readonly pins?: readonly ModuleScenePin[];
+}
+/**
+ * One map pin on a scene. Mirrors Foundry V13's `NoteDocument` shape,
+ * trimmed to the fields the ingestion engine actually needs (no icon,
+ * tint, font, glow, or text-anchor — those are display concerns,
+ * irrelevant to RAG retrieval).
+ */
+export interface ModuleScenePin {
+    /** Foundry note document id; stable per-pin within a scene. */
+    readonly id: string;
+    /** Foreign key to a `JournalEntry` document — required. */
+    readonly entryId: string;
+    /**
+     * Specific page within the linked journal entry (Foundry V13+).
+     * Optional because legacy adventures (or pins authored against pre-
+     * V13 modules) reference the entire entry without a page anchor.
+     */
+    readonly pageId?: string;
+    /**
+     * Pin label as shown on the scene (often the room code itself,
+     * e.g. "A10"). Optional because some pins inherit their label from
+     * the linked journal page name without storing it locally.
+     */
+    readonly label?: string;
+    /** Pin position in the scene image — useful for future spatial features. */
+    readonly x?: number;
+    readonly y?: number;
+}
+/**
+ * Module → backend — full enumeration response. Sent as a single
+ * frame after the module finishes walking all matching packs. Long-
+ * running on the module side (~10-30s for AV-class); the backend
+ * uses the existing task-decomposition chat-progress flow to keep
+ * the GM informed during the wait.
+ */
+export interface ClientModuleContentResponsePayload {
+    /** Echoes the request's `correlationId` so the backend correlates response → task. */
+    readonly correlationId: string;
+    /** Echoes the request's `adventureId`. */
+    readonly adventureId: string;
+    readonly journals: readonly ModuleJournalEntry[];
+    readonly items: readonly ModuleItem[];
+    readonly scenes: readonly ModuleSceneSummary[];
+    /**
+     * Bestiary / NPC actors. Optional for backwards-compatibility with
+     * pre-Commit-6 clients that don't enumerate actors; ingestion engine
+     * defaults to `[]` when absent.
+     */
+    readonly actors?: readonly ModuleActor[];
+    /**
+     * Version string from `game.modules.get(versionManifestId)?.version`,
+     * captured at enumeration time. Backend stores as
+     * `foundry_campaigns.module_ingested_version` for major-update
+     * detection. `"unknown"` when the module isn't installed (shouldn't
+     * happen during a valid ingestion request but defensive).
+     */
+    readonly version: string;
+    /** Pre-aggregated counts so the backend can log progress without re-walking. */
+    readonly counts: {
+        readonly journalEntries: number;
+        readonly journalPages: number;
+        readonly items: number;
+        readonly scenes: number;
+        /** Optional for backwards-compatibility with pre-Commit-6 clients. */
+        readonly actors?: number;
+    };
+}
+/**
+ * Module → backend — fired by the GM clicking the "Yes Ingest" button
+ * in the consent message Napoleon surfaced. Triggers the full
+ * ingestion chain: backend creates a task, returns commands including
+ * `backend.module_content.request` (Commit 5b) which kicks the
+ * compendium walk; module enumerates and replies with
+ * `client.module_content.response`; relay forwards to backend's
+ * `/my/foundry/module-ingest` (Commit 5c); backend ingests + writes
+ * knowledge rows.
+ *
+ * Buttons live in `chat-buttons.ts`'s click handler; payload fields
+ * come from the button's `data-adventure-id` + `data-campaign-id`
+ * attributes the backend rendered into the consent message HTML.
+ */
+export interface ClientAdventureIngestionRequestPayload {
+    readonly correlationId: string;
+    /** Adventure key from `KNOWN_APS` (e.g. `"abomination-vaults"`). */
+    readonly adventureId: string;
+    /** Campaign id the GM clicked the button under. */
+    readonly campaignId: string;
+}
+/**
+ * Module → backend — fired by the GM clicking "Not now" on the
+ * consent message. Backend writes
+ * `foundry_campaigns.module_ingestion_declined_at = now()` so
+ * subsequent /napoleon queries don't re-prompt for 30 days. The GM
+ * can re-surface the offer at any time by saying "re-offer
+ * ingestion" in chat (Commit 5d classifier intent).
+ */
+export interface ClientAdventureIngestionDeclineRequestPayload {
+    readonly correlationId: string;
+    readonly adventureId: string;
+    readonly campaignId: string;
+}
+/**
  * Payload for `error`. Sent by either side to report a structured error.
  * The relay uses this to forward validation failures and auth errors back
  * to the client; the client uses it to report local errors (e.g. a failed
@@ -425,6 +1140,30 @@ export type BackendActorUpdateMessage = BaseMessage<"backend.actor.update", Back
 export type BackendJournalCreateMessage = BaseMessage<"backend.journal.create", BackendJournalCreatePayload>;
 /** `backend.rolltable.create` — backend → relay → module, create roll table. */
 export type BackendRollTableCreateMessage = BaseMessage<"backend.rolltable.create", BackendRollTableCreatePayload>;
+/** `backend.scene.create` — backend → relay → module, create scene with background map image. */
+export type BackendSceneCreateMessage = BaseMessage<"backend.scene.create", BackendSceneCreatePayload>;
+/** `backend.token.create` — backend → relay → module, place an actor's token on a scene. */
+export type BackendTokenCreateMessage = BaseMessage<"backend.token.create", BackendTokenCreatePayload>;
+/** `backend.wall.create` — backend → relay → module, place a wall segment on a scene (V2 Phase 3). */
+export type BackendWallCreateMessage = BaseMessage<"backend.wall.create", BackendWallCreatePayload>;
+/** `backend.light.create` — backend → relay → module, place an ambient light on a scene (V2 Phase 3). */
+export type BackendLightCreateMessage = BaseMessage<"backend.light.create", BackendLightCreatePayload>;
+/** `backend.scene.update` — backend → relay → module, apply scene-level setting changes (V2 Phase 3). */
+export type BackendSceneUpdateMessage = BaseMessage<"backend.scene.update", BackendSceneUpdatePayload>;
+/** `backend.data.upload` — backend → relay → module, persist Barn file into Foundry Data (+ optional follow-up). */
+export type BackendDataUploadMessage = BaseMessage<"backend.data.upload", BackendDataUploadPayload>;
+/** `client.data_upload_ack` — module → relay → backend, telemetry for a data.upload outcome. */
+export type ClientDataUploadAckMessage = BaseMessage<"client.data_upload_ack", ClientDataUploadAckPayload>;
+/** `client.world_save_request` — module → relay, triggers Barn→Data persist pipeline (relay forwards to backend HTTP). */
+export type ClientWorldSaveRequestMessage = BaseMessage<"client.world_save_request", ClientWorldSaveRequestPayload>;
+/** `backend.module_content.request` — backend → relay → module, request AP compendium-pack enumeration (V2 Phase 4 Commit 5b). */
+export type BackendModuleContentRequestMessage = BaseMessage<"backend.module_content.request", BackendModuleContentRequestPayload>;
+/** `client.module_content.response` — module → relay → backend, full enumerated AP content for Trough ingestion (V2 Phase 4 Commit 5b). */
+export type ClientModuleContentResponseMessage = BaseMessage<"client.module_content.response", ClientModuleContentResponsePayload>;
+/** `client.adventure_ingestion_request` — module → relay → backend, "Yes Ingest" button click fires this (V2 Phase 4 Commit 5d). */
+export type ClientAdventureIngestionRequestMessage = BaseMessage<"client.adventure_ingestion_request", ClientAdventureIngestionRequestPayload>;
+/** `client.adventure_ingestion_decline_request` — module → relay → backend, "Not now" button click fires this (V2 Phase 4 Commit 5d). */
+export type ClientAdventureIngestionDeclineRequestMessage = BaseMessage<"client.adventure_ingestion_decline_request", ClientAdventureIngestionDeclineRequestPayload>;
 /** `ping` — both directions, keep-alive probe. */
 export type PingMessage = BaseMessage<"ping", PingPayload>;
 /** `pong` — both directions, response to ping. */
@@ -435,7 +1174,7 @@ export type ErrorMessage = BaseMessage<"error", ErrorPayload>;
  * The full protocol message union. Use `switch (msg.kind)` to narrow to a
  * specific variant with type-safe payload access.
  */
-export type ProtocolMessage = ClientHelloMessage | RelayWelcomeMessage | ClientQueryMessage | ClientSessionEventMessage | BackendChatCreateMessage | BackendActorCreateMessage | BackendActorUpdateMessage | BackendJournalCreateMessage | BackendRollTableCreateMessage | PingMessage | PongMessage | ErrorMessage;
+export type ProtocolMessage = ClientHelloMessage | RelayWelcomeMessage | ClientQueryMessage | ClientSessionEventMessage | BackendChatCreateMessage | BackendActorCreateMessage | BackendActorUpdateMessage | BackendJournalCreateMessage | BackendRollTableCreateMessage | BackendSceneCreateMessage | BackendSceneUpdateMessage | BackendTokenCreateMessage | BackendWallCreateMessage | BackendLightCreateMessage | BackendDataUploadMessage | ClientDataUploadAckMessage | ClientWorldSaveRequestMessage | BackendModuleContentRequestMessage | ClientModuleContentResponseMessage | ClientAdventureIngestionRequestMessage | ClientAdventureIngestionDeclineRequestMessage | PingMessage | PongMessage | ErrorMessage;
 /**
  * Helper type that extracts the payload type for a given message kind. Used
  * by `makeMessage` to ensure the payload matches the declared kind.
