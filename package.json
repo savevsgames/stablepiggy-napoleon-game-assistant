@@ -1,6 +1,6 @@
 {
   "name": "stablepiggy-napoleon-game-assistant",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "description": "An AI-assisted co-GM module for Foundry Virtual Tabletop. Connects Foundry to the StablePiggy platform via a configurable WebSocket relay.",
   "homepage": "https://github.com/savevsgames/stablepiggy-napoleon-game-assistant",
