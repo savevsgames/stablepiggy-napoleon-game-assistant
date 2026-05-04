@@ -1,13 +1,28 @@
-# Build-context hygiene for docker build -f relay/Dockerfile .
+# Build-context hygiene shared by every Dockerfile in this repo.
 # Lives at the repo root because that is the build context root for
-# the multi-stage relay build. Stage 1 runs a fresh `npm install`, so
-# workstation node_modules/dist add upload time with no build value.
+# both the relay build (`docker build -f relay/Dockerfile .`) and the
+# napoleon-foundry build (`docker build -f docker/foundry/Dockerfile .`).
+#
+# Stage 1 of the relay build runs a fresh `npm install`, so workstation
+# node_modules add upload time with no build value. The relay also doesn't
+# need any prebuilt dist/ output (it builds its own bundle in a multi-stage).
+#
+# napoleon-foundry, on the other hand, NEEDS the prebuilt dist/scripts/
+# bytes from the most-recent module build — that's the whole point of
+# baking module bytes into the image. So we exclude all of dist/ broadly,
+# then re-include dist/scripts/ explicitly.
+#
 # relay/.env holds the real RELAY_BACKEND_TOKEN — excluding it here
 # prevents shipping that secret into the Docker daemon's build cache
 # even though the multi-stage runtime image never bakes it in.
 
 node_modules
 dist
+# napoleon-foundry needs dist/scripts/ in the build context — re-include
+# only that subtree without unbreaking the broader dist/ exclude (so e.g.
+# protocol/dist/ and relay/dist/ stay out for builds that include them).
+!dist/scripts
+!dist/scripts/**
 .env
 .env.local
 .git
