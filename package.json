@@ -27,6 +27,7 @@
     "dev": "concurrently --names \"module,relay\" --prefix-colors \"cyan,magenta\" \"npm run dev -w @stablepiggy-napoleon/module\" \"npm run dev -w @stablepiggy-napoleon/relay\"",
     "typecheck": "npm run typecheck -w @stablepiggy-napoleon/protocol && npm run typecheck -w @stablepiggy-napoleon/module && npm run typecheck -w @stablepiggy-napoleon/relay",
     "test": "npm run test -w @stablepiggy-napoleon/protocol",
+    "bump:version": "node bin/bump-version.mjs",
     "clean": "rimraf dist protocol/dist relay/dist scripts/node_modules relay/node_modules protocol/node_modules node_modules"
   },
   "devDependencies": {
