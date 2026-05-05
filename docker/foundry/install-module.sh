@@ -75,4 +75,23 @@ fi
 # CMD args (Foundry launcher path + flags) verbatim — Foundry's
 # v13 default is "resources/app/main.mjs --port=30000 --headless
 # --noupdate --dataPath=/data".
+#
+# **Defensive fallback** (added 2026-05-05). The Dockerfile re-declares
+# felddy's CMD explicitly so callers that don't override Cmd at runtime
+# get the expected args — but if a future caller ever passes
+# cmd: [] (empty array) at docker.run time, "$@" expands to nothing
+# here and felddy's /home/node/entrypoint.sh crashes on `set -u`
+# referencing an unbound `$1` (line 21). Belt-and-suspenders: detect
+# the empty case and pass felddy's args explicitly. The values match
+# felddy/foundryvtt:13's CMD verbatim AND the Dockerfile's CMD line —
+# all three sources have the same args so a future Foundry version
+# bump only needs the Dockerfile change.
+if [ "$#" -eq 0 ]; then
+  exec /home/node/entrypoint.sh \
+    resources/app/main.mjs \
+    --port=30000 \
+    --headless \
+    --noupdate \
+    --dataPath=/data
+fi
 exec /home/node/entrypoint.sh "$@"

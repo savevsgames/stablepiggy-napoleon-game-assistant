@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `docker/foundry/Dockerfile` — explicit `CMD` line restoring felddy/foundryvtt's expected launcher args (`resources/app/main.mjs --port=30000 --headless --noupdate --dataPath=/data`). Docker silently resets a parent image's CMD to `[]` when the derived Dockerfile sets `ENTRYPOINT`; the original Dockerfile comment claimed CMD was inherited but it wasn't. Production trigger: `bundle.create` calls `docker.createContainer` with no `Cmd` field (the StablePiggy MCP server's `provisionContainer` implementation). With CMD silently empty, `install-module.sh` chained to felddy's entrypoint with no arguments, hitting `set -u` on an unbound `$1` and crashing on every container start. Reproduced 2026-05-05 during the V2 verification run.
+- `docker/foundry/install-module.sh` — defensive fallback when `"$@"` is empty: pass felddy's expected launcher args explicitly. Belt-and-suspenders against any future caller that passes `cmd: []` (empty array) to `docker run`.
+
 ### Planned for 0.1.0 (Tier 1 initial release)
 
 - `module.json` manifest with full Foundry v13 compatibility declarations
