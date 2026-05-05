@@ -709,6 +709,18 @@ function debug(message, ...rest) {
   if (!debugEnabled()) return;
   console.debug(`${PREFIX} ${message}`, ...rest);
 }
+function notifyGm(level, message, persistent = true) {
+  if (level === "error") error(message);
+  else if (level === "warn") warn(message);
+  else info(message);
+  try {
+    const opts = persistent ? { permanent: true } : void 0;
+    if (level === "error") ui?.notifications?.error(message, opts);
+    else if (level === "warn") ui?.notifications?.warn(message, opts);
+    else ui?.notifications?.info(message, opts);
+  } catch {
+  }
+}
 const MODULE_ID$2 = "stablepiggy-napoleon-game-assistant";
 const SETTING_RELAY_ENDPOINT = "relayEndpoint";
 const SETTING_AUTH_TOKEN = "authToken";
@@ -1042,6 +1054,18 @@ const MODULE_VERSION$1 = "0.0.1";
 const PING_INTERVAL_MS = 3e4;
 const BACKOFF_INITIAL_MS = 1e3;
 const BACKOFF_MAX_MS = 3e4;
+const PLACEHOLDER_DV_KEY = "dv-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+const PLACEHOLDER_RELAY_URL = "wss://<your-org-slug>-napoleon-relay.app.stablepiggy.com";
+function isValidRelayUrl(url) {
+  if (!url) return false;
+  if (!url.startsWith("ws://") && !url.startsWith("wss://")) return false;
+  try {
+    const parsed = new URL(url);
+    return !!parsed.hostname;
+  } catch {
+    return false;
+  }
+}
 class RelayClient {
   ctx;
   socket = null;
@@ -1064,6 +1088,16 @@ class RelayClient {
    * chat-command.ts and the `handleChatCreate` method below.
    */
   pendingPlaceholders = /* @__PURE__ */ new Map();
+  /**
+   * V2 loud-failure UX (§3.2) — once-per-connection-attempt notification
+   * suppression. Without these flags the reconnect loop would re-fire
+   * the same persistent notification on every retry, flooding the GM's
+   * notifications stack. Set when the corresponding case fires; cleared
+   * on successful welcome so the GM sees fresh notifications if the
+   * problem recurs after a working session.
+   */
+  surfacedAuthFailure = false;
+  surfacedTransportFailure = false;
   constructor(ctx) {
     this.ctx = ctx;
   }
@@ -1084,15 +1118,24 @@ class RelayClient {
     }
     const endpoint = getRelayEndpoint();
     const authToken = getAuthToken();
-    if (!endpoint) {
-      warn(
-        "relay endpoint not configured — open the module settings and set 'Relay endpoint' to your relay's WebSocket URL, then reload the world"
+    if (!authToken) {
+      notifyGm(
+        "warn",
+        `StablePiggy Napoleon: paste your auth key into Module Settings → StablePiggy Napoleon → "Auth token". The key starts with dv- and looks like ${PLACEHOLDER_DV_KEY}. Get yours from the StablePiggy dashboard at https://app.stablepiggy.com/dashboard, then reload the world.`
       );
       return;
     }
-    if (!authToken) {
-      warn(
-        "auth token not configured — open the module settings and paste your StablePiggy API key (or a shared secret), then reload the world"
+    if (!endpoint) {
+      notifyGm(
+        "warn",
+        `StablePiggy Napoleon: set the relay URL in Module Settings → StablePiggy Napoleon → "Relay endpoint". For platform-hosted Foundry it should look like ${PLACEHOLDER_RELAY_URL} where <your-org-slug> matches your StablePiggy farm. Then reload the world.`
+      );
+      return;
+    }
+    if (!isValidRelayUrl(endpoint)) {
+      notifyGm(
+        "warn",
+        `StablePiggy Napoleon: the relay URL "${endpoint}" doesn't look right. Expected format: ${PLACEHOLDER_RELAY_URL} (must start with ws:// or wss:// and have a valid hostname). Update Module Settings → StablePiggy Napoleon → "Relay endpoint" and reload the world.`
       );
       return;
     }
@@ -1376,6 +1419,24 @@ class RelayClient {
     if (this.shuttingDown) {
       return;
     }
+    if (ev.code === 1008) {
+      if (!this.surfacedAuthFailure) {
+        this.surfacedAuthFailure = true;
+        notifyGm(
+          "error",
+          `StablePiggy Napoleon: the relay rejected your auth key. The key may have been rotated or revoked. Generate a fresh one from the StablePiggy dashboard and update Module Settings → StablePiggy Napoleon → "Auth token", then reload the world.`
+        );
+      }
+    } else if (!wasConnected) {
+      if (!this.surfacedTransportFailure) {
+        this.surfacedTransportFailure = true;
+        const endpoint = getRelayEndpoint();
+        notifyGm(
+          "error",
+          `StablePiggy Napoleon: can't reach the relay at "${endpoint}". Check the URL is correct (should look like ${PLACEHOLDER_RELAY_URL}) and that the StablePiggy farm is running. Module Settings → StablePiggy Napoleon → "Relay endpoint" — update + reload.`
+        );
+      }
+    }
     if (wasConnected) {
       this.backoffMs = BACKOFF_INITIAL_MS;
     }
@@ -1384,6 +1445,8 @@ class RelayClient {
   onWelcome() {
     this.status = "connected";
     this.backoffMs = BACKOFF_INITIAL_MS;
+    this.surfacedAuthFailure = false;
+    this.surfacedTransportFailure = false;
     info("relay handshake complete");
     this.startPingLoop();
   }
