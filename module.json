@@ -2,7 +2,7 @@
   "id": "stablepiggy-napoleon-game-assistant",
   "title": "StablePiggy Napoleon Game Assistant",
   "description": "An AI-assisted co-GM module for Foundry VTT. Generates NPCs, remembers campaign lore across sessions, answers rules questions, and produces session prep packages. Supports Pathfinder 2nd Edition (pf2e system v7.12.1+) with additional systems planned. Connects to the StablePiggy platform via a configurable relay service.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "compatibility": {
     "minimum": "13",
     "verified": "13.351",
