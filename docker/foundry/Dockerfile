@@ -53,8 +53,21 @@ USER node
 # launcher child process — replacing PID 1 would break graceful shutdown).
 ENTRYPOINT ["/usr/local/bin/install-module.sh"]
 
-# CMD is inherited from felddy/foundryvtt:13:
-#   ["resources/app/main.mjs", "--port=30000", "--headless",
-#    "--noupdate", "--dataPath=/data"]
-# The wrapper passes "$@" through verbatim so this CMD reaches felddy's
-# entrypoint unchanged.
+# Re-declare felddy's CMD explicitly. **Load-bearing.** Docker's
+# documented behavior: setting ENTRYPOINT in a derived Dockerfile
+# RESETS the inherited CMD to []. Without this line, callers that
+# don't override Cmd at runtime (which is exactly what
+# `bundles/provision.ts::provisionContainer` does — no Cmd field on
+# the createContainer call) would see Docker exec install-module.sh
+# with empty "$@", and felddy's /home/node/entrypoint.sh hits
+# `set -u` on an unbound `$1` and crashes on line 21. Reproduced on
+# 2026-05-05 during V2 verification: bundle.create rolled back with
+# "Container is not running" while the container had been
+# crash-restart-looping with this exact error.
+#
+# The values match felddy/foundryvtt:13's own CMD verbatim so the
+# wrapper's `exec /home/node/entrypoint.sh "$@"` chains felddy with
+# its expected args. install-module.sh ALSO carries a defensive
+# fallback for the same args in case a future caller ever passes
+# cmd: [] explicitly — belt-and-suspenders.
+CMD ["resources/app/main.mjs", "--port=30000", "--headless", "--noupdate", "--dataPath=/data"]
