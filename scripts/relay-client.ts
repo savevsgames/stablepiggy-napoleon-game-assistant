@@ -106,7 +106,7 @@ import {
   type BackendModuleContentRequestPayload,
 } from "@stablepiggy-napoleon/protocol";
 
-import { info, warn, error as logError, debug } from "./log.js";
+import { info, warn, error as logError, debug, notifyGm } from "./log.js";
 import { getAuthToken, getRelayEndpoint } from "./settings.js";
 import { uploadToWorld } from "./world-files.js";
 import { enumerateAdventureContent, summarizeCounts } from "./module-content.js";
@@ -300,6 +300,35 @@ const PING_INTERVAL_MS = 30_000;
 const BACKOFF_INITIAL_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 
+// ─── V2 loud-failure UX placeholders ────────────────────────────────────
+//
+// FOUNDRY-HARNESS-V2 §3.2 cases 1-3: when the GM hasn't pasted module
+// settings yet, surface notifications that show what valid input looks
+// like rather than just "missing settings". These appear in error
+// messages alongside "go to Module Settings → ..." instructions.
+const PLACEHOLDER_DV_KEY = "dv-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+const PLACEHOLDER_RELAY_URL =
+  "wss://<your-org-slug>-napoleon-relay.app.stablepiggy.com";
+
+/**
+ * Cheap structural validity check on the relay URL setting. Catches
+ * common typos (no scheme, http://, garbage strings) without trying
+ * to verify reachability — that's the relay-client's job at connect
+ * time, surfaced separately via case 5.
+ *
+ * Allows ws:// (local-dev) and wss:// (production / hosted Foundry).
+ */
+function isValidRelayUrl(url: string): boolean {
+  if (!url) return false;
+  if (!url.startsWith("ws://") && !url.startsWith("wss://")) return false;
+  try {
+    const parsed = new URL(url);
+    return !!parsed.hostname;
+  } catch {
+    return false;
+  }
+}
+
 type ConnectionStatus =
   | "disconnected"
   | "connecting"
@@ -348,6 +377,17 @@ export class RelayClient {
    */
   private readonly pendingPlaceholders = new Map<string, string>();
 
+  /**
+   * V2 loud-failure UX (§3.2) — once-per-connection-attempt notification
+   * suppression. Without these flags the reconnect loop would re-fire
+   * the same persistent notification on every retry, flooding the GM's
+   * notifications stack. Set when the corresponding case fires; cleared
+   * on successful welcome so the GM sees fresh notifications if the
+   * problem recurs after a working session.
+   */
+  private surfacedAuthFailure = false;
+  private surfacedTransportFailure = false;
+
   constructor(ctx: RelayClientContext) {
     this.ctx = ctx;
   }
@@ -371,17 +411,56 @@ export class RelayClient {
     const endpoint = getRelayEndpoint();
     const authToken = getAuthToken();
 
-    if (!endpoint) {
-      warn(
-        "relay endpoint not configured — open the module settings and set " +
-          "'Relay endpoint' to your relay's WebSocket URL, then reload the world"
+    // FOUNDRY-HARNESS-V2 §3.2 cases 1-3: pre-connect validation. Each
+    // case returns early — no point opening a WebSocket with bad/missing
+    // settings. The notifications are persistent so the GM doesn't miss
+    // them in the world-load chatter.
+    //
+    // No suppression flags here because connect() returning early stops
+    // the reconnect loop entirely (no scheduleReconnect call below) —
+    // the GM gets one notification per Foundry world load, then has to
+    // fix the setting + reload to retry. That matches Foundry's
+    // `requiresReload: true` hint on both settings.
+    if (!authToken) {
+      // Case 1: empty auth token
+      notifyGm(
+        "warn",
+        `StablePiggy Napoleon: paste your auth key into Module Settings → ` +
+          `StablePiggy Napoleon → "Auth token". The key starts with dv- and ` +
+          `looks like ${PLACEHOLDER_DV_KEY}. Get yours from the StablePiggy ` +
+          `dashboard at https://app.stablepiggy.com/dashboard, then reload ` +
+          `the world.`,
       );
       return;
     }
-    if (!authToken) {
-      warn(
-        "auth token not configured — open the module settings and paste " +
-          "your StablePiggy API key (or a shared secret), then reload the world"
+    if (!endpoint) {
+      // Case 2: empty relay URL. Spec originally also tripped on the
+      // dev-default `ws://localhost:8080` value, but that breaks local
+      // development (devs running a relay locally on that port can't
+      // override it). Trust case 5 (transport failure at runtime) to
+      // surface "wrong URL" with the actual value embedded — more
+      // informative than blanket-blocking the dev default.
+      notifyGm(
+        "warn",
+        `StablePiggy Napoleon: set the relay URL in Module Settings → ` +
+          `StablePiggy Napoleon → "Relay endpoint". For platform-hosted ` +
+          `Foundry it should look like ${PLACEHOLDER_RELAY_URL} where ` +
+          `<your-org-slug> matches your StablePiggy farm. Then reload the ` +
+          `world.`,
+      );
+      return;
+    }
+    if (!isValidRelayUrl(endpoint)) {
+      // Case 3: relayEndpoint set but malformed (wrong scheme, no
+      // hostname, etc). Cheap structural check above; reachability is
+      // case 5's job.
+      notifyGm(
+        "warn",
+        `StablePiggy Napoleon: the relay URL "${endpoint}" doesn't look ` +
+          `right. Expected format: ${PLACEHOLDER_RELAY_URL} (must start ` +
+          `with ws:// or wss:// and have a valid hostname). Update Module ` +
+          `Settings → StablePiggy Napoleon → "Relay endpoint" and reload ` +
+          `the world.`,
       );
       return;
     }
@@ -712,12 +791,48 @@ export class RelayClient {
       return;
     }
 
-    // A clean 1000 close is unusual unless the relay initiated it.
-    // Either way the reconnect path handles it. A 1008 close typically
-    // means auth failed — keep reconnecting so the GM can fix their
-    // settings and the module picks up the new values after reload.
-    // (We don't auto-pick-up new settings without a reload — Foundry's
-    // requiresReload hint tells the GM to reload on change.)
+    // FOUNDRY-HARNESS-V2 §3.2 cases 4 + 5: surface persistent
+    // notifications to the GM on auth-rejection / transport failure.
+    // Suppression flags prevent the reconnect loop from spamming the
+    // notifications stack — fire once per failure mode per session,
+    // reset on successful welcome (onWelcome below).
+    if (ev.code === 1008) {
+      // Case 4: relay actively rejected the auth key (close code 1008
+      // = "policy violation", what the relay sends on hello.failure).
+      // Distinct from transport failure — we DID reach the relay; it
+      // refused us.
+      if (!this.surfacedAuthFailure) {
+        this.surfacedAuthFailure = true;
+        notifyGm(
+          "error",
+          `StablePiggy Napoleon: the relay rejected your auth key. The ` +
+            `key may have been rotated or revoked. Generate a fresh one ` +
+            `from the StablePiggy dashboard and update Module Settings → ` +
+            `StablePiggy Napoleon → "Auth token", then reload the world.`,
+        );
+      }
+    } else if (!wasConnected) {
+      // Case 5: transport failure — never got a successful welcome, so
+      // close happened during the WebSocket-open or hello phases. Could
+      // be DNS failure, connection refused, TLS error, wrong URL, etc.
+      // ev.code 1006 is the typical "abnormal closure" the browser
+      // synthesises when the WebSocket never opens cleanly.
+      //
+      // We DON'T fire this when wasConnected was true (that case is a
+      // mid-session disconnect — silent reconnect handles it). Only
+      // first-attempt-or-retry-still-failing scenarios surface here.
+      if (!this.surfacedTransportFailure) {
+        this.surfacedTransportFailure = true;
+        const endpoint = getRelayEndpoint();
+        notifyGm(
+          "error",
+          `StablePiggy Napoleon: can't reach the relay at "${endpoint}". ` +
+            `Check the URL is correct (should look like ${PLACEHOLDER_RELAY_URL}) ` +
+            `and that the StablePiggy farm is running. Module Settings → ` +
+            `StablePiggy Napoleon → "Relay endpoint" — update + reload.`,
+        );
+      }
+    }
 
     // Reset backoff only if we had a successful session before this close.
     if (wasConnected) {
@@ -729,6 +844,13 @@ export class RelayClient {
   private onWelcome(): void {
     this.status = "connected";
     this.backoffMs = BACKOFF_INITIAL_MS;
+    // Reset V2 §3.2 notification suppression — a successful welcome
+    // means the GM's settings work. If something later breaks (relay
+    // restart with a rotated key, transport blip, etc.) the next
+    // failure cycle gets fresh notifications instead of being eaten
+    // by the suppression flags from a prior failure.
+    this.surfacedAuthFailure = false;
+    this.surfacedTransportFailure = false;
     info("relay handshake complete");
     this.startPingLoop();
   }
