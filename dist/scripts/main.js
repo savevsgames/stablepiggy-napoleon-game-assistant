@@ -1658,6 +1658,10 @@ class RelayClient {
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=actor.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(
         `Actor.create threw for backend.actor.create: ${msg}`,
         err
@@ -1729,6 +1733,10 @@ class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=actor.update correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(`Actor.update threw for "${actorName}": ${msg}`, err);
       await this.renderActorFeedback(
         payload.correlationId,
@@ -1826,6 +1834,10 @@ class RelayClient {
       created = await JournalEntry.create(createData, createOptions);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=journal.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(
         `JournalEntry.create threw for backend.journal.create: ${msg}`,
         err
@@ -1936,6 +1948,10 @@ class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=rolltable.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(`RollTable.create threw for "${name}": ${msg}`, err);
     }
   }
@@ -2023,6 +2039,10 @@ class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=scene.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(`Scene.create threw for "${name}": ${msg}`, err);
     }
   }
@@ -2085,6 +2105,10 @@ class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=token.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(`Token placement threw for "${actorName}": ${msg}`, err);
     }
   }
@@ -2171,6 +2195,10 @@ class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=wall.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(`handleWallCreate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
     }
   }
@@ -2228,6 +2256,10 @@ class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=light.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(`handleLightCreate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
     }
   }
@@ -2291,6 +2323,10 @@ class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=scene.update correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       error(`handleSceneUpdate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
     }
   }
