@@ -1104,6 +1104,13 @@ export class RelayClient {
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Structured breadcrumb for grep cross-reference with backend
+      // [NAPOLEON-LOOP-SUMMARY] line. payloadKeys is field names only —
+      // never values. See FOUNDRY-EMIT-ACK-DESIGN.md §3.1.
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=actor.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(
         `Actor.create threw for backend.actor.create: ${msg}`,
         err
@@ -1193,6 +1200,10 @@ export class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=actor.update correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(`Actor.update threw for "${actorName}": ${msg}`, err);
       await this.renderActorFeedback(
         payload.correlationId,
@@ -1308,6 +1319,10 @@ export class RelayClient {
       created = await JournalEntry.create(createData, createOptions);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=journal.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(
         `JournalEntry.create threw for backend.journal.create: ${msg}`,
         err
@@ -1431,6 +1446,10 @@ export class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=rolltable.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(`RollTable.create threw for "${name}": ${msg}`, err);
     }
   }
@@ -1526,6 +1545,10 @@ export class RelayClient {
       } catch { /* non-blocking confirmation whisper */ }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=scene.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(`Scene.create threw for "${name}": ${msg}`, err);
     }
   }
@@ -1600,6 +1623,10 @@ export class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=token.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(`Token placement threw for "${actorName}": ${msg}`, err);
     }
   }
@@ -1696,6 +1723,10 @@ export class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=wall.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(`handleWallCreate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
     }
   }
@@ -1758,6 +1789,10 @@ export class RelayClient {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=light.create correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(`handleLightCreate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
     }
   }
@@ -1827,6 +1862,10 @@ export class RelayClient {
       } catch { /* non-blocking */ }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[NAPOLEON-EMIT-FAIL] kind=scene.update correlationId=${payload.correlationId ?? "none"} error=${msg.replace(/\s+/g, " ").trim()} payloadKeys=${Object.keys(payload).join(",")}`,
+        err
+      );
       logError(`handleSceneUpdate threw on scene "${scene.name ?? scene.id}": ${msg}`, err);
     }
   }
